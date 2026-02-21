@@ -1040,3 +1040,90 @@ curl.exe -X POST http://localhost:5051/scheduler/config -d '{"MaxBrowserConcurre
 ```
 
 **Result:** PASS – Smart scheduler with priority lanes, concurrency limits, and monitoring.
+
+---
+
+## Phase 14.8 — Regression Suite ✅
+
+**Features:**
+- Comprehensive E2E regression tests
+- Chaos testing for resilience
+- Security regression tests
+
+**Test Scripts:**
+- `scripts/phase14-e2e.ps1` - End-to-end tests (16 tests)
+- `scripts/phase14-chaos.ps1` - Chaos/resilience tests (7 tests)
+- `scripts/phase14-security.ps1` - Security tests (12 tests)
+
+**E2E Tests (phase14-e2e.ps1):**
+- Core/Net health
+- Task lifecycle (create, get, cancel)
+- Planner (intent detection, step generation)
+- Policy engine (rules, evaluation)
+- LLM adapter (health, interpret)
+- Scheduler (stats, availability)
+- Approval service (simulator toggle)
+- Encrypted store verification
+
+**Chaos Tests (phase14-chaos.ps1):**
+- Task persistence across restarts
+- Outbox deduplication under load
+- Concurrent task creation (5 parallel)
+- Large payload handling (~5KB)
+- Invalid input handling
+- Recovery state check
+- Scheduler resilience under rapid enqueues
+
+**Security Tests (phase14-security.ps1):**
+- No secrets in repository
+- Database encryption (SQLCipher)
+- Modern crypto (X25519+ChaCha20)
+- Policy enforcement (DENY rules)
+- Money/Identity protection
+- LLM input sanitization
+- Task prompt encryption
+- Approval simulator isolation
+- No .env files in repo
+- No hardcoded credentials
+
+**Self-Test Commands:**
+```powershell
+# Run all Phase 14 tests
+.\scripts\phase14-e2e.ps1       # 16/16 passed
+.\scripts\phase14-chaos.ps1     # 7/7 passed
+.\scripts\phase14-security.ps1  # 12/12 passed
+
+# Security check
+.\scripts\check-no-secrets.ps1  # PASS
+
+# Unit tests
+cd core.tests; dotnet test  # 12/12 passed
+```
+
+**Result:** PASS – Full regression suite covering E2E, chaos, and security tests.
+
+---
+
+## Phase 14 COMPLETE ✅
+
+All sub-phases done:
+- 14.0: Baseline verification + branch
+- 14.1: Task model + state machine (encrypted persistence)
+- 14.2: Policy engine (allowlist, entity scope, time windows)
+- 14.3: Browser worker (Playwright) + local testsite
+- 14.4: Secret input + captcha loop (E2E encrypted)
+- 14.5: Local LLM adapter (Ollama) with heuristic fallback
+- 14.6: Deterministic planner (LLM intent + deterministic plans)
+- 14.7: Smart scheduler (priority lanes, resource governor)
+- 14.8: Regression suite (E2E, chaos, security)
+
+**Agent Capabilities:**
+- LLM-powered intent interpretation with fallback
+- Deterministic task planning for known intents
+- Policy-based action control
+- Browser automation via Playwright
+- Encrypted task storage (SQLCipher + DPAPI)
+- E2E encrypted secrets and captcha flow
+- Priority-based scheduling with resource limits
+- Crash recovery and persistence
+- Comprehensive test coverage
