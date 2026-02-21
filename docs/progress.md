@@ -751,3 +751,52 @@ curl.exe -X POST http://localhost:5051/policy/evaluate -d '{"domain":"evil.com"}
 ```
 
 **Result:** PASS – Policy engine blocks/allows based on domain, action kind, and custom rules.
+
+---
+
+## Phase 14.3 — Browser Worker + Testsite ✅
+
+**Features:**
+- Playwright-based browser automation (headful Chromium)
+- Deterministic actions: openUrl, click, fill, waitFor, extractTable, downloadFile, screenshotSelector
+- Local testsite for testing (served by Net):
+  - /testsite/login - Login form
+  - /testsite/captcha - CAPTCHA verification
+  - /testsite/dashboard - Data table
+  - /testsite/download - CSV export
+- No page content logged (only hashes and structured extracts)
+
+**Endpoints:**
+- GET /tool/browser/health - Check browser availability
+- POST /tool/browser/runStep - Execute browser steps
+- GET /tool/browser/status/{runId} - Get run status
+- GET /tool/browser/runs - List all runs
+- GET /testsite/* - Local test pages
+
+**Self-Test Commands:**
+```powershell
+# Test testsite
+curl.exe http://localhost:5052/testsite/login
+curl.exe http://localhost:5052/testsite/dashboard
+curl.exe http://localhost:5052/testsite/download
+
+# Test browser health
+curl.exe http://localhost:5052/tool/browser/health
+# => {"available":true}
+
+# E2E test: login -> extract table -> download CSV
+curl.exe -X POST http://localhost:5052/tool/browser/runStep -d '{
+  "steps": [
+    {"action":"openUrl","params":{"url":"http://localhost:5052/testsite/login"}},
+    {"action":"fill","params":{"selector":"#username","value":"test"}},
+    {"action":"fill","params":{"selector":"#password","value":"pass"}},
+    {"action":"click","params":{"selector":"#loginBtn"}},
+    {"action":"waitFor","params":{"selector":"#dataTable"}},
+    {"action":"extractTable","params":{"selector":"#dataTable"}},
+    {"action":"downloadFile","params":{"selector":"#downloadLink","filename":"data.csv"}}
+  ]
+}'
+# => {"status":"completed","results":[...all success...]}
+```
+
+**Result:** PASS – E2E browser automation with testsite working.

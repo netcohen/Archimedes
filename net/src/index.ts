@@ -1,6 +1,8 @@
 import * as http from "http";
 import { getEnvelopeStore, getCurrentMode, healthCheck } from "./firestore";
 import { safeLogPayload, safeLog } from "./redactor";
+import { handleTestsite } from "./testsite";
+import { runBrowserSteps, getRunStatus, getAllRuns, isBrowserAvailable, BrowserStep } from "./browser";
 
 const PORT = 5052;
 const CORE_URL = "http://localhost:5051";
@@ -8,6 +10,9 @@ const CORE_URL = "http://localhost:5051";
 const envelopeQueue: string[] = [];
 
 const server = http.createServer((req, res) => {
+  if (handleTestsite(req, res)) {
+    return;
+  }
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
@@ -178,6 +183,64 @@ const server = http.createServer((req, res) => {
     })();
     return;
   }
+
+  if (req.method === "GET" && req.url === "/tool/browser/health") {
+    (async () => {
+      try {
+        const available = await isBrowserAvailable();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ available }));
+      } catch (e) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ available: false, error: String(e) }));
+      }
+    })();
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/tool/browser/runStep") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", async () => {
+      try {
+        const { steps, runId } = JSON.parse(body) as { steps: BrowserStep[]; runId?: string };
+        if (!steps || !Array.isArray(steps)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "steps array required" }));
+          return;
+        }
+        safeLog("Browser", `Running ${steps.length} steps`);
+        const result = await runBrowserSteps(steps, runId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/tool/browser/status/")) {
+    const runId = req.url.split("/").pop() || "";
+    const status = getRunStatus(runId);
+    if (!status) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Run not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(status));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/tool/browser/runs") {
+    const runs = getAllRuns();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(runs));
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
