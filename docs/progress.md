@@ -344,6 +344,62 @@ curl.exe -X POST http://localhost:5052/firestore-test -d "phase13E-test"
 
 ---
 
+### Phase 13.C – Outbox + Retry + Dedup ✅
+
+**Status:** Complete
+
+**Done:**
+- Created `core/Outbox.cs`:
+  - `OutboxEntry` with id, operationId, payload, destination, status, attempts, nextRetry, error
+  - `OutboxStatus`: PENDING, SENDING, SENT, FAILED
+  - `OutboxService` with enqueue, process, drain, background worker
+  - Exponential backoff: 1m → 5m → 15m → 60m
+  - Deduplication via operationId
+- Added endpoints to Core:
+  - `POST /outbox/enqueue` - enqueue with operationId
+  - `GET /outbox/entries` - list all entries
+  - `GET /outbox/stats` - get counts by status
+  - `POST /outbox/drain` - manually drain pending
+- Background worker starts automatically, processes pending entries every 5s
+- Updated Net firestore.ts:
+  - `WriteResult` type with id + isDuplicate
+  - Memory store: operationId index for dedup
+  - Firestore: query by operationId before write
+- Added `POST /v1/envelope/idempotent` endpoint (requires X-Operation-Id header)
+- Updated `/firestore-test` to return `duplicate` flag
+
+**Self-test:**
+```powershell
+# All builds
+cd core; dotnet build           # PASS
+cd ../net; npm run build        # PASS
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13C-test"
+# {"id":"fs_...","ok":true,"mode":"real","duplicate":false,...}
+
+# Test deduplication (same operationId twice)
+curl.exe -X POST http://localhost:5052/v1/envelope/idempotent -d "test" -H "X-Operation-Id: dedup-test-1"
+# {"id":"fs_...","duplicate":false,"mode":"real"}
+curl.exe -X POST http://localhost:5052/v1/envelope/idempotent -d "test" -H "X-Operation-Id: dedup-test-1"
+# {"id":"fs_...","duplicate":true,"mode":"real"}
+
+# Test outbox enqueue + drain
+curl.exe -X POST http://localhost:5051/outbox/enqueue -d @body.json
+# {"ok":true,"entryId":"...","duplicate":false}
+curl.exe http://localhost:5051/outbox/stats
+# {"total":1,"pending":0,"sent":1,...}  (auto-sent by worker)
+
+# Same operationId returns duplicate
+curl.exe -X POST http://localhost:5051/outbox/enqueue -d @body.json
+# {"ok":true,"entryId":"...","duplicate":true}
+```
+
+**Result:** PASS – Durable outbox, exponential retry, operationId deduplication working.
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:

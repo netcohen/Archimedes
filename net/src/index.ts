@@ -107,13 +107,46 @@ const server = http.createServer((req, res) => {
         const store = await getEnvelopeStore();
         const mode = store.getMode();
         const payload = body || "test envelope";
-        const id = await store.write(payload);
-        const doc = await store.read(id);
+        const operationId = req.headers["x-operation-id"] as string | undefined;
+        const result = await store.write(payload, operationId);
+        const doc = await store.read(result.id);
         const ok = doc !== null && doc.payload === payload;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id, ok, mode, readPayload: doc?.payload }));
+        res.end(JSON.stringify({ 
+          id: result.id, 
+          ok, 
+          mode, 
+          duplicate: result.isDuplicate,
+          readPayload: doc?.payload 
+        }));
       } catch (e) {
         res.writeHead(500);
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+  if (req.method === "POST" && req.url === "/v1/envelope/idempotent") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", async () => {
+      try {
+        const store = await getEnvelopeStore();
+        const operationId = req.headers["x-operation-id"] as string | undefined;
+        if (!operationId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "X-Operation-Id header required" }));
+          return;
+        }
+        const result = await store.write(body, operationId);
+        res.writeHead(result.isDuplicate ? 200 : 201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          id: result.id,
+          duplicate: result.isDuplicate,
+          mode: store.getMode()
+        }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(e) }));
       }
     });

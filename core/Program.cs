@@ -6,6 +6,11 @@ builder.Services.AddHttpClient();
 
 var app = builder.Build();
 
+var httpClientFactory = app.Services.GetRequiredService<IHttpClientFactory>();
+var outboxHttpClient = httpClientFactory.CreateClient();
+var outboxService = new OutboxService(outboxHttpClient);
+outboxService.StartWorker();
+
 var envelopeQueue = new Queue<string>();
 var pairingSessions = new Dictionary<string, (byte[] CorePrivateKey, byte[] DevicePublicKey)>();
 var pendingApprovals = new Dictionary<string, PendingApproval>();
@@ -238,6 +243,51 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
     var enc = Crypto.EncryptBase64(message, pub);
     var dec = Crypto.DecryptBase64(enc, priv);
     return Results.Json(new { encrypted = enc, decrypted = dec, ok = dec == message });
+});
+
+app.MapPost("/outbox/enqueue", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var operationId = json.RootElement.GetProperty("operationId").GetString() ?? Guid.NewGuid().ToString("N");
+    var payload = json.RootElement.GetProperty("payload").GetString() ?? "";
+    var destination = json.RootElement.GetProperty("destination").GetString() ?? "http://localhost:5052/envelope";
+
+    var result = outboxService.Enqueue(operationId, payload, destination);
+    return Results.Json(new
+    {
+        ok = result.Success,
+        entryId = result.EntryId,
+        duplicate = result.IsDuplicate,
+        error = result.Error
+    });
+});
+
+app.MapGet("/outbox/entries", () =>
+{
+    var entries = outboxService.GetAllEntries().Select(e => new
+    {
+        e.Id,
+        e.OperationId,
+        status = e.Status.ToString(),
+        e.Attempts,
+        e.NextRetry,
+        e.Error
+    });
+    return Results.Json(entries);
+});
+
+app.MapGet("/outbox/stats", () =>
+{
+    var stats = outboxService.GetStats();
+    return Results.Json(stats);
+});
+
+app.MapPost("/outbox/drain", async () =>
+{
+    var sent = await outboxService.DrainAsync();
+    return Results.Json(new { drained = sent });
 });
 
 var port = 5051;

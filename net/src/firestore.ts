@@ -1,11 +1,17 @@
 export interface EnvelopeDoc {
   id: string;
   payload: string;
+  operationId?: string;
   createdAt?: Date;
 }
 
+export interface WriteResult {
+  id: string;
+  isDuplicate: boolean;
+}
+
 export interface EnvelopeStore {
-  write(payload: string): Promise<string>;
+  write(payload: string, operationId?: string): Promise<WriteResult>;
   read(id: string): Promise<EnvelopeDoc | null>;
   getMode(): FirestoreMode;
 }
@@ -13,13 +19,24 @@ export interface EnvelopeStore {
 export type FirestoreMode = "real" | "emulator" | "memory";
 
 const memoryStore = new Map<string, EnvelopeDoc>();
+const operationIdIndex = new Map<string, string>();
 
 function createMemoryStore(): EnvelopeStore {
   return {
-    async write(payload: string): Promise<string> {
+    async write(payload: string, operationId?: string): Promise<WriteResult> {
+      if (operationId && operationIdIndex.has(operationId)) {
+        const existingId = operationIdIndex.get(operationId)!;
+        return { id: existingId, isDuplicate: true };
+      }
+
       const id = "mem_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-      memoryStore.set(id, { id, payload, createdAt: new Date() });
-      return id;
+      memoryStore.set(id, { id, payload, operationId, createdAt: new Date() });
+      
+      if (operationId) {
+        operationIdIndex.set(operationId, id);
+      }
+      
+      return { id, isDuplicate: false };
     },
     async read(id: string): Promise<EnvelopeDoc | null> {
       return memoryStore.get(id) ?? null;
@@ -80,12 +97,24 @@ async function createFirestoreStore(mode: "real" | "emulator"): Promise<Envelope
     const db = admin.firestore();
     
     return {
-      async write(payload: string): Promise<string> {
+      async write(payload: string, operationId?: string): Promise<WriteResult> {
+        if (operationId) {
+          const existing = await db.collection("envelopes")
+            .where("operationId", "==", operationId)
+            .limit(1)
+            .get();
+          
+          if (!existing.empty) {
+            return { id: "fs_" + existing.docs[0].id, isDuplicate: true };
+          }
+        }
+
         const ref = await db.collection("envelopes").add({
           payload,
+          operationId: operationId || null,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        return "fs_" + ref.id;
+        return { id: "fs_" + ref.id, isDuplicate: false };
       },
       async read(id: string): Promise<EnvelopeDoc | null> {
         const docId = id.startsWith("fs_") ? id.slice(3) : id;
@@ -95,6 +124,7 @@ async function createFirestoreStore(mode: "real" | "emulator"): Promise<Envelope
         return {
           id: "fs_" + doc.id,
           payload: d.payload,
+          operationId: d.operationId,
           createdAt: d.createdAt?.toDate?.(),
         };
       },
@@ -147,16 +177,16 @@ export async function healthCheck(): Promise<{
     const mode = store.getMode();
     
     const testPayload = `health_check_${Date.now()}`;
-    const id = await store.write(testPayload);
-    const doc = await store.read(id);
+    const result = await store.write(testPayload);
+    const doc = await store.read(result.id);
     
     if (!doc || doc.payload !== testPayload) {
       return { ok: false, mode, error: "Write/read mismatch" };
     }
     
     const docPath = mode === "memory" 
-      ? `memory/${id}` 
-      : `envelopes/${id.replace("fs_", "")}`;
+      ? `memory/${result.id}` 
+      : `envelopes/${result.id.replace("fs_", "")}`;
     
     return { ok: true, mode, docPath };
   } catch (e) {
