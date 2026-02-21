@@ -128,7 +128,7 @@ app.MapPost("/task/run-with-approval", async (HttpRequest req) =>
     var tcs = new TaskCompletionSource<bool>();
     approvalWait[taskId] = tcs;
     pendingApprovals[taskId] = new PendingApproval { TaskId = taskId, Message = message };
-    Console.WriteLine($"[Core] Task {taskId} WAITING_FOR_USER: {message}");
+    ArchLogger.LogPayload("Task approval request", message);
     var approved = await tcs.Task;
     pendingApprovals.Remove(taskId);
     approvalWait.Remove(taskId);
@@ -186,7 +186,7 @@ app.MapPost("/envelope", async (HttpRequest req) =>
     using var r = new StreamReader(req.Body);
     var body = await r.ReadToEndAsync();
     envelopeQueue.Enqueue(string.IsNullOrEmpty(body) ? "{}" : body);
-    Console.WriteLine($"[Core] Received envelope: {body}");
+    ArchLogger.LogPayload("Envelope received", body);
     return Results.Text("OK", "text/plain");
 });
 

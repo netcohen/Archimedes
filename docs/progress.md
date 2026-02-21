@@ -296,6 +296,54 @@ curl.exe -X POST http://localhost:5052/firestore-test -d "phase13-test"
 
 ---
 
+### Phase 13.E – Log Redaction + Tests ✅
+
+**Status:** Complete
+
+**Done:**
+- Created `core/Redactor.cs`:
+  - Pattern-based redaction for passwords, tokens, API keys, OTPs, cookies, headers, private keys, JWTs
+  - `Redact()` - replaces sensitive values with `[REDACTED len=X hash=Y]`
+  - `RedactPayload()` - returns only metadata: `[payload len=X hash=Y]`
+  - `RedactJson()` - redacts sensitive keys in JSON strings
+  - `SafeMetadata()` - returns dict with length, hash, hasContent
+- Updated `core/Logger.cs`:
+  - All logging methods now use `Redactor.Redact()`
+  - Added `LogInfo`, `LogWarn`, `LogError`, `LogPayload` methods
+- Updated `core/Program.cs`:
+  - Envelope logging uses `ArchLogger.LogPayload()` (no raw data)
+  - Task approval logging uses `ArchLogger.LogPayload()`
+- Created `net/src/redactor.ts`:
+  - TypeScript port of redaction logic
+  - `redact()`, `redactPayload()`, `safeMetadata()`, `safeLog()`, `safeLogPayload()`
+- Updated `net/src/index.ts`:
+  - Envelope logging uses `safeLogPayload()` (no raw data)
+- Created `core.tests/` xUnit project with 13 tests for Redactor
+
+**Self-test:**
+```powershell
+# Core build
+cd core; dotnet build  # PASS
+
+# Net build
+cd ../net; npm run build  # PASS
+
+# Core tests (redaction)
+cd ../core.tests; dotnet test
+# Passed! - Failed: 0, Passed: 13, Skipped: 0
+
+# Android build
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13E-test"
+# {"id":"fs_1WyG15lGeMffiGYCyniG","ok":true,"mode":"real",...}
+```
+
+**Result:** PASS – No sensitive data in logs, all redaction tests pass.
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:

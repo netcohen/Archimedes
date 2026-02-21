@@ -1,5 +1,6 @@
 import * as http from "http";
 import { getEnvelopeStore, getCurrentMode, healthCheck } from "./firestore";
+import { safeLogPayload, safeLog } from "./redactor";
 
 const PORT = 5052;
 const CORE_URL = "http://localhost:5051";
@@ -17,7 +18,7 @@ const server = http.createServer((req, res) => {
     req.on("data", (chunk) => (body += chunk.toString()));
     req.on("end", () => {
       envelopeQueue.push(body || "{}");
-      console.log("[Net] Received envelope:", body || "(empty)");
+      safeLogPayload("Net", body || "");
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("OK");
     });
