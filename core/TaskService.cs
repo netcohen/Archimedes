@@ -17,11 +17,20 @@ public class TaskService
     
     public AgentTask CreateTask(CreateTaskRequest request)
     {
+        // Validate prompt is not empty
+        if (string.IsNullOrWhiteSpace(request.UserPrompt))
+        {
+            throw new ArgumentException("UserPrompt is required and cannot be empty");
+        }
+        
+        var promptBytes = Encoding.UTF8.GetBytes(request.UserPrompt);
+        var promptHash = AgentTask.HashPrompt(request.UserPrompt);
+        
         var task = new AgentTask
         {
-            Title = request.Title,
-            UserPromptLength = request.UserPrompt.Length,
-            UserPromptHash = AgentTask.HashPrompt(request.UserPrompt),
+            Title = string.IsNullOrWhiteSpace(request.Title) ? "Untitled Task" : request.Title,
+            UserPromptLength = promptBytes.Length,
+            UserPromptHash = promptHash,
             Schedule = request.Schedule
         };
         
@@ -30,10 +39,11 @@ public class TaskService
         if (Enum.TryParse<TaskPriority>(request.Priority, true, out var priority))
             task.Priority = priority;
         
+        // Encrypt and store the prompt
         task.UserPromptEncrypted = EncryptString(request.UserPrompt);
         
         _store.SaveTask(task);
-        ArchLogger.LogInfo($"Task created: id={task.TaskId} title={Redactor.Redact(task.Title)}");
+        ArchLogger.LogInfo($"Task created: id={task.TaskId} promptLen={task.UserPromptLength} promptHash={task.UserPromptHash}");
         
         return task;
     }
@@ -87,11 +97,46 @@ public class TaskService
             throw new InvalidOperationException($"Cannot run in state {task.State}");
         }
         
+        // Verify prompt is available
+        if (string.IsNullOrEmpty(task.UserPromptEncrypted) || task.UserPromptLength <= 0)
+        {
+            task.State = TaskState.FAILED;
+            task.Error = "MissingPrompt: User prompt not found or empty";
+            task.UpdatedAtUtc = DateTime.UtcNow;
+            _store.SaveTask(task);
+            ArchLogger.LogError($"Task {taskId} failed: MissingPrompt");
+            return task;
+        }
+        
+        // Verify prompt can be decrypted
+        try
+        {
+            var prompt = DecryptString(task.UserPromptEncrypted);
+            if (string.IsNullOrEmpty(prompt))
+            {
+                task.State = TaskState.FAILED;
+                task.Error = "MissingPrompt: Unable to decrypt prompt";
+                task.UpdatedAtUtc = DateTime.UtcNow;
+                _store.SaveTask(task);
+                ArchLogger.LogError($"Task {taskId} failed: Unable to decrypt prompt");
+                return task;
+            }
+        }
+        catch (Exception ex)
+        {
+            task.State = TaskState.FAILED;
+            task.Error = $"MissingPrompt: Decrypt error - {ex.Message}";
+            task.UpdatedAtUtc = DateTime.UtcNow;
+            _store.SaveTask(task);
+            ArchLogger.LogError($"Task {taskId} failed: Decrypt error");
+            return task;
+        }
+        
         task.State = TaskState.RUNNING;
         task.UpdatedAtUtc = DateTime.UtcNow;
         
         _store.SaveTask(task);
-        ArchLogger.LogInfo($"Task running: id={taskId}");
+        ArchLogger.LogInfo($"Task running: id={taskId} promptLen={task.UserPromptLength}");
         
         return task;
     }

@@ -30,6 +30,9 @@ public class SmartScheduler
     // Monitoring tasks
     private readonly ConcurrentDictionary<string, MonitoringTask> _monitoringTasks = new();
     
+    // Watchdog settings
+    private int _watchdogTimeoutSeconds = 300; // 5 minutes default
+    
     private bool _running = false;
     private CancellationTokenSource? _cts;
     
@@ -51,6 +54,7 @@ public class SmartScheduler
         
         Task.Run(async () => await SchedulerLoop(_cts.Token));
         Task.Run(async () => await MonitoringLoop(_cts.Token));
+        Task.Run(async () => await WatchdogLoop(_cts.Token));
         
         ArchLogger.LogInfo("[Scheduler] Started");
     }
@@ -164,7 +168,7 @@ public class SmartScheduler
     /// <summary>
     /// Configure resource limits.
     /// </summary>
-    public void ConfigureLimits(int? maxBrowserConcurrency = null, int? maxCpuPercent = null, int? maxMemoryMB = null)
+    public void ConfigureLimits(int? maxBrowserConcurrency = null, int? maxCpuPercent = null, int? maxMemoryMB = null, int? watchdogTimeoutSeconds = null)
     {
         if (maxBrowserConcurrency.HasValue)
             _maxBrowserConcurrency = maxBrowserConcurrency.Value;
@@ -172,8 +176,10 @@ public class SmartScheduler
             _maxCpuPercent = maxCpuPercent.Value;
         if (maxMemoryMB.HasValue)
             _maxMemoryMB = maxMemoryMB.Value;
+        if (watchdogTimeoutSeconds.HasValue)
+            _watchdogTimeoutSeconds = watchdogTimeoutSeconds.Value;
         
-        ArchLogger.LogInfo($"[Scheduler] Configured limits: browser={_maxBrowserConcurrency}, cpu={_maxCpuPercent}%, memory={_maxMemoryMB}MB");
+        ArchLogger.LogInfo($"[Scheduler] Configured limits: browser={_maxBrowserConcurrency}, cpu={_maxCpuPercent}%, memory={_maxMemoryMB}MB, watchdog={_watchdogTimeoutSeconds}s");
     }
     
     private async Task SchedulerLoop(CancellationToken ct)
@@ -257,6 +263,67 @@ public class SmartScheduler
             {
                 ArchLogger.LogError($"[Scheduler] Error in monitoring loop: {ex.Message}");
                 await Task.Delay(1000, ct);
+            }
+        }
+    }
+    
+    private async Task WatchdogLoop(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                var stuckTasks = new List<string>();
+                
+                // Check for stuck active tasks
+                foreach (var kvp in _activeTasks)
+                {
+                    var activeTask = kvp.Value;
+                    var elapsed = (now - activeTask.StartedAt).TotalSeconds;
+                    
+                    if (elapsed > _watchdogTimeoutSeconds)
+                    {
+                        stuckTasks.Add(kvp.Key);
+                    }
+                }
+                
+                // Also check for RUNNING tasks in the store that are not in _activeTasks
+                var runningTasks = _taskService.GetTasks(TaskState.RUNNING);
+                foreach (var task in runningTasks)
+                {
+                    // Skip if actively being processed
+                    if (_activeTasks.ContainsKey(task.TaskId)) continue;
+                    
+                    // Skip if waiting for approval
+                    if (!string.IsNullOrEmpty(task.WaitingForApprovalId)) continue;
+                    
+                    var elapsed = (now - (task.UpdatedAtUtc ?? task.CreatedAtUtc)).TotalSeconds;
+                    
+                    if (elapsed > _watchdogTimeoutSeconds)
+                    {
+                        stuckTasks.Add(task.TaskId);
+                    }
+                }
+                
+                // Fail stuck tasks
+                foreach (var taskId in stuckTasks.Distinct())
+                {
+                    ArchLogger.LogWarn($"[Watchdog] Task {taskId} stuck for >{_watchdogTimeoutSeconds}s, marking as FAILED");
+                    _taskService.Fail(taskId, $"WatchdogTimeout: No progress for {_watchdogTimeoutSeconds}s");
+                    _activeTasks.TryRemove(taskId, out _);
+                }
+                
+                await Task.Delay(30000, ct); // Check every 30 seconds
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                ArchLogger.LogError($"[Watchdog] Error: {ex.Message}");
+                await Task.Delay(30000, ct);
             }
         }
     }
@@ -414,6 +481,7 @@ public class SchedulerConfigRequest
     public int? MaxBrowserConcurrency { get; set; }
     public int? MaxCpuPercent { get; set; }
     public int? MaxMemoryMB { get; set; }
+    public int? WatchdogTimeoutSeconds { get; set; }
 }
 
 public class MonitoringRequest

@@ -496,7 +496,8 @@ app.MapPost("/scheduler/config", (HttpRequest req) =>
     smartScheduler.ConfigureLimits(
         request.MaxBrowserConcurrency,
         request.MaxCpuPercent,
-        request.MaxMemoryMB);
+        request.MaxMemoryMB,
+        request.WatchdogTimeoutSeconds);
     
     return Results.Json(new { ok = true, stats = smartScheduler.GetStats() });
 });
@@ -594,8 +595,15 @@ app.MapPost("/task", async (HttpRequest req) =>
     if (request == null)
         return Results.BadRequest("Invalid request");
     
-    var task = taskService.CreateTask(request);
-    return Results.Json(TaskResponse.FromTask(task));
+    try
+    {
+        var task = taskService.CreateTask(request);
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/task/{id}", (string id) =>

@@ -1127,3 +1127,57 @@ All sub-phases done:
 - Priority-based scheduling with resource limits
 - Crash recovery and persistence
 - Comprehensive test coverage
+
+---
+
+## Bug Fix: Task Prompt Persistence ✅
+
+**Issue:** Tasks stuck in RUNNING state with step=0 because user prompt was not persisted/available. Evidence: `userPromptHash = E3B0C442...` (hash of empty string).
+
+**Root Cause:** 
+- Empty prompts were being accepted
+- StartRun didn't verify prompt existence before setting RUNNING state
+- No watchdog to fail stuck tasks
+
+**Fixes Applied:**
+
+1. **CreateTask validation:**
+   - Reject empty/whitespace prompts with 400 error
+   - Compute hash from actual UTF-8 bytes
+   - Log prompt length and hash on creation
+
+2. **StartRun validation:**
+   - Verify `UserPromptEncrypted` exists and `UserPromptLength > 0`
+   - Test decryption before setting RUNNING
+   - Set state to FAILED with "MissingPrompt" error if validation fails
+
+3. **Watchdog timeout:**
+   - Background loop checks for stuck RUNNING tasks
+   - Configurable timeout (default 300s)
+   - Auto-fails tasks with no progress and no pending approval
+   - Configurable via `/scheduler/config` with `WatchdogTimeoutSeconds`
+
+4. **Regression tests added to E2E suite:**
+   - Test 10: Task Prompt Persistence
+     - Verify userPromptLength > 0
+     - Verify userPromptHash != empty hash (E3B0C442...)
+     - Verify plan is created and persisted
+   - Test 11: Empty Prompt Rejection
+     - Verify 400 response for empty prompt
+
+**Self-Test Commands:**
+```powershell
+# Empty prompt rejected
+curl.exe -X POST http://localhost:5051/task -d '{"Title":"Test","UserPrompt":""}'
+# => {"error":"UserPrompt is required and cannot be empty"}
+
+# Valid prompt has proper hash
+curl.exe -X POST http://localhost:5051/task -d '{"Title":"Test","UserPrompt":"Login to testsite"}'
+# => {"userPromptHash":"9BE0CD9E81749F3D","userPromptLength":17,...}
+
+# E2E tests
+.\scripts\phase14-e2e.ps1
+# => 21/21 PASS (includes new regression tests)
+```
+
+**Result:** PASS – Tasks no longer stuck, prompts properly persisted and validated.

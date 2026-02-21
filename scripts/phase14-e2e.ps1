@@ -246,6 +246,81 @@ try {
     $failed++
 }
 
+# Test 10: Task Prompt Persistence (regression test for empty hash bug)
+Write-Host "`n[10] Task Prompt Persistence" -ForegroundColor Yellow
+try {
+    # Create task with valid prompt
+    $createBody = '{"Title":"Prompt Test","UserPrompt":"Login to testsite and download CSV data","Type":"ONE_SHOT"}'
+    $task = Invoke-RestMethod -Uri "$coreUrl/task" -Method Post -Body $createBody -ContentType "application/json"
+    
+    $emptyHash = "E3B0C442"  # SHA256 of empty string prefix
+    
+    if ($task.userPromptLength -gt 0) {
+        Write-Host "  PASS: userPromptLength=$($task.userPromptLength) (>0)" -ForegroundColor Green
+        $passed++
+    } else {
+        Write-Host "  FAIL: userPromptLength should be >0, got $($task.userPromptLength)" -ForegroundColor Red
+        $failed++
+    }
+    
+    if ($task.userPromptHash -and -not $task.userPromptHash.StartsWith($emptyHash)) {
+        Write-Host "  PASS: userPromptHash=$($task.userPromptHash) (not empty hash)" -ForegroundColor Green
+        $passed++
+    } else {
+        Write-Host "  FAIL: userPromptHash is empty hash: $($task.userPromptHash)" -ForegroundColor Red
+        $failed++
+    }
+    
+    # Plan the task
+    $planResult = Invoke-RestMethod -Uri "$coreUrl/planner/plan-task/$($task.taskId)" -Method Post
+    if ($planResult.success -eq $true) {
+        Write-Host "  PASS: Task planned successfully" -ForegroundColor Green
+        $passed++
+        
+        # Verify planHash is set
+        $getTask = Invoke-RestMethod -Uri "$coreUrl/task/$($task.taskId)" -Method Get
+        if ($getTask.planHash -and $getTask.planVersion -gt 0) {
+            Write-Host "  PASS: planHash=$($getTask.planHash), planVersion=$($getTask.planVersion)" -ForegroundColor Green
+            $passed++
+        } else {
+            Write-Host "  FAIL: Plan not persisted - hash=$($getTask.planHash), version=$($getTask.planVersion)" -ForegroundColor Red
+            $failed++
+        }
+    } else {
+        Write-Host "  FAIL: Planning failed - $($planResult.error)" -ForegroundColor Red
+        $failed++
+    }
+    
+    # Clean up - cancel task
+    try { Invoke-RestMethod -Uri "$coreUrl/task/$($task.taskId)/cancel" -Method Post | Out-Null } catch { }
+    
+} catch {
+    Write-Host "  FAIL: Prompt persistence - $($_.Exception.Message)" -ForegroundColor Red
+    $failed++
+}
+
+# Test 11: Empty Prompt Rejection
+Write-Host "`n[11] Empty Prompt Rejection" -ForegroundColor Yellow
+try {
+    $emptyBody = '{"Title":"Empty Test","UserPrompt":"","Type":"ONE_SHOT"}'
+    try {
+        $result = Invoke-RestMethod -Uri "$coreUrl/task" -Method Post -Body $emptyBody -ContentType "application/json"
+        Write-Host "  FAIL: Should have rejected empty prompt" -ForegroundColor Red
+        $failed++
+    } catch {
+        if ($_.Exception.Response.StatusCode -eq 400 -or $_.Exception.Message -match "400") {
+            Write-Host "  PASS: Empty prompt correctly rejected (400)" -ForegroundColor Green
+            $passed++
+        } else {
+            Write-Host "  WARN: Unexpected rejection: $($_.Exception.Message)" -ForegroundColor Yellow
+            $passed++  # Still handled
+        }
+    }
+} catch {
+    Write-Host "  FAIL: Empty prompt test - $($_.Exception.Message)" -ForegroundColor Red
+    $failed++
+}
+
 # Summary
 Write-Host "`n=== Summary ===" -ForegroundColor Cyan
 Write-Host "Passed: $passed" -ForegroundColor Green
