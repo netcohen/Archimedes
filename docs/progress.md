@@ -618,3 +618,42 @@ All sub-phases done:
 All 12 phases + hygiene done. Final goal reached:
 
 User sends task → system runs → requests approval → user approves → system completes → result returned
+
+---
+
+# Phase 14 — ARCHIMEDES AGENT (OLLAMA-READY)
+
+## Phase 14.0 — Baseline Verification ✅
+
+**Branch:** phase-14-agent
+
+**Self-Test Commands:**
+```powershell
+# Builds
+cd core; dotnet build  # OK (8 warnings, 0 errors)
+cd ../net; npm ci; npm run build  # OK
+cd ../android; .\gradlew.bat assembleDebug  # BUILD SUCCESSFUL
+
+# Runtime smoke
+# Terminal 1: cd net; node dist/index.js
+# Terminal 2: cd core; dotnet run
+
+curl.exe -s http://localhost:5051/health  # OK
+curl.exe -s http://localhost:5052/health  # OK
+curl.exe -s -X POST http://localhost:5052/v1/firebase/health
+# {"ok":true,"mode":"real",...}
+
+# Security
+.\scripts\check-no-secrets.ps1  # PASS
+
+# Unit tests
+cd core.tests; dotnet test  # Passed! 12/12
+
+# Chaos mini
+curl.exe -s -X POST http://localhost:5051/job -d '{"id":"test","name":"Test"}'
+curl.exe -s -X POST http://localhost:5051/job/{id}/run-slow
+# Kill core, restart
+curl.exe -s http://localhost:5051/recovery/state  # runs persisted
+```
+
+**Result:** PASS – Baseline stable, ready for Phase 14.

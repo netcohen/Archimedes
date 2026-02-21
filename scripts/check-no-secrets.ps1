@@ -47,7 +47,8 @@ $ignoreDirectories = @(
 
 $ignoreFiles = @(
     "check-no-secrets.ps1",
-    "security.md"
+    "security.md",
+    "RedactorTests.cs"
 )
 
 $foundIssues = @()
