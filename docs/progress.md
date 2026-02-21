@@ -800,3 +800,50 @@ curl.exe -X POST http://localhost:5052/tool/browser/runStep -d '{
 ```
 
 **Result:** PASS – E2E browser automation with testsite working.
+
+---
+
+## Phase 14.4 — Secret + Captcha Loop ✅
+
+**Features:**
+- Extended approval types: CONFIRMATION, SECRET_INPUT, CAPTCHA_DECODE
+- Secret input never stored in plaintext (encrypted with E2E crypto)
+- Captcha images encrypted to phone using X25519+ChaCha20-Poly1305
+- Auto-delete captcha blobs after use
+- SIMULATOR mode for testing (auto-responds to approvals)
+- Android activities for secret input and captcha display
+
+**Core Endpoints:**
+- GET /v2/approvals - List pending approvals
+- GET /v2/approval/{id} - Get approval details
+- POST /v2/approval/{id}/respond - Respond to approval
+- POST /v2/approval/request/confirmation - Request confirmation
+- POST /v2/approval/request/secret - Request secret input
+- POST /v2/approval/request/captcha - Request captcha decode
+- POST /v2/approval/simulator/enable - Enable simulator mode
+- POST /v2/approval/simulator/disable - Disable simulator
+
+**Android Components:**
+- SecretInputActivity - Password/secret entry with encryption
+- CaptchaActivity - Display captcha image and capture solution
+
+**Self-Test Commands:**
+```powershell
+# Enable simulator
+curl.exe -X POST http://localhost:5051/v2/approval/simulator/enable
+# => {"ok":true,"mode":"simulator"}
+
+# Test confirmation
+curl.exe -X POST http://localhost:5051/v2/approval/request/confirmation -d '{"taskId":"test","message":"Proceed?"}'
+# => {"approved":true}
+
+# Test secret input
+curl.exe -X POST http://localhost:5051/v2/approval/request/secret -d '{"taskId":"test","prompt":"Enter password"}'
+# => {"approved":true,"hasSecret":true}
+
+# Test captcha
+curl.exe -X POST http://localhost:5051/v2/approval/request/captcha -d '{"taskId":"test","imageBase64":"..."}'
+# => {"approved":true,"captchaSolution":"SIMULATED"}
+```
+
+**Result:** PASS – Secret/captcha loop with simulator and encrypted E2E transport.

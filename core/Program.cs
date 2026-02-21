@@ -25,6 +25,11 @@ var jobs = new Dictionary<string, Job>();
 var runs = new List<Run>();
 var statePath = Path.Combine(Path.GetTempPath(), "archimedes_state.json");
 
+var deviceKeyManager = new DeviceKeyManager();
+var taskService = new TaskService(encryptedStore, deviceKeyManager);
+var policyEngine = new PolicyEngine();
+var approvalService = new ApprovalService(deviceKeyManager);
+
 SavedState? LoadStateFromDisk()
 {
     if (!File.Exists(statePath)) return null;
@@ -261,6 +266,117 @@ app.MapPost("/approval-response", async (HttpRequest req) =>
     return Results.Json(new { ok = true });
 });
 
+app.MapGet("/v2/approvals", () =>
+{
+    var pending = approvalService.GetPendingApprovals();
+    return Results.Json(pending.Select(a => new
+    {
+        a.Id,
+        a.TaskId,
+        type = a.Type.ToString(),
+        a.Message,
+        hasCaptcha = a.CaptchaImageBase64Encrypted != null,
+        a.CreatedAt
+    }));
+});
+
+app.MapGet("/v2/approval/{id}", (string id) =>
+{
+    var approval = approvalService.GetApproval(id);
+    if (approval == null)
+        return Results.NotFound();
+    return Results.Json(new
+    {
+        approval.Id,
+        approval.TaskId,
+        type = approval.Type.ToString(),
+        approval.Message,
+        approval.CaptchaImageBase64Encrypted,
+        approval.CreatedAt
+    });
+});
+
+app.MapPost("/v2/approval/{id}/respond", async (string id, HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    
+    var response = new ApprovalResponse { ApprovalId = id };
+    
+    if (json.RootElement.TryGetProperty("approved", out var approvedProp))
+        response.Approved = approvedProp.GetBoolean();
+    if (json.RootElement.TryGetProperty("secretValue", out var secretProp))
+        response.SecretValue = secretProp.GetString();
+    if (json.RootElement.TryGetProperty("captchaSolution", out var captchaProp))
+        response.CaptchaSolution = captchaProp.GetString();
+    
+    var ok = approvalService.Respond(response);
+    return Results.Json(new { ok });
+});
+
+app.MapPost("/v2/approval/request/confirmation", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var message = json.RootElement.GetProperty("message").GetString() ?? "";
+    
+    var response = await approvalService.RequestConfirmation(taskId, message);
+    return Results.Json(new { response.Approved });
+});
+
+app.MapPost("/v2/approval/request/secret", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var prompt = json.RootElement.GetProperty("prompt").GetString() ?? "";
+    
+    var response = await approvalService.RequestSecret(taskId, prompt);
+    return Results.Json(new { response.Approved, hasSecret = response.SecretValue != null });
+});
+
+app.MapPost("/v2/approval/request/captcha", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var imageBase64 = json.RootElement.GetProperty("imageBase64").GetString() ?? "";
+    
+    var imageBytes = Convert.FromBase64String(imageBase64);
+    var response = await approvalService.RequestCaptcha(taskId, imageBytes);
+    return Results.Json(new { response.Approved, response.CaptchaSolution });
+});
+
+app.MapPost("/v2/approval/simulator/enable", () =>
+{
+    approvalService.EnableSimulator(request =>
+    {
+        switch (request.Type)
+        {
+            case ApprovalType.CONFIRMATION:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true };
+            case ApprovalType.SECRET_INPUT:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true, SecretValue = "simulated-secret" };
+            case ApprovalType.CAPTCHA_DECODE:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true, CaptchaSolution = "SIMULATED" };
+            default:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = false };
+        }
+    });
+    return Results.Json(new { ok = true, mode = "simulator" });
+});
+
+app.MapPost("/v2/approval/simulator/disable", () =>
+{
+    approvalService.DisableSimulator();
+    return Results.Json(new { ok = true, mode = "real" });
+});
+
 app.MapGet("/pairing-data", () =>
 {
     var sessionId = Guid.NewGuid().ToString("N");
@@ -345,10 +461,6 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
     var dec = Crypto.DecryptBase64(enc, priv);
     return Results.Json(new { version = 1, algorithm = "RSA-OAEP-SHA256", encrypted = enc, decrypted = dec, ok = dec == message });
 });
-
-var deviceKeyManager = new DeviceKeyManager();
-var taskService = new TaskService(encryptedStore, deviceKeyManager);
-var policyEngine = new PolicyEngine();
 
 app.MapPost("/task", async (HttpRequest req) =>
 {
