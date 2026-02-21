@@ -525,6 +525,94 @@ curl.exe -X POST http://localhost:5052/firestore-test -d "phase13B-test"
 
 ---
 
+### Phase 13.A – Crypto Modernization (X25519 + AEAD) ✅
+
+**Status:** Complete
+
+**Done:**
+- Added NuGet package: `Sodium.Core` (libsodium wrapper)
+- Created `core/ModernCrypto.cs`:
+  - `VersionedEnvelope` with version=2, deviceId, operationId, timestamp, nonce, ciphertext, ephemeralPublicKey
+  - `ModernCrypto` static class:
+    - X25519 key pair generation
+    - X25519 key exchange + ChaCha20-Poly1305 AEAD encryption
+    - Ephemeral keys for forward secrecy
+    - Envelope verification (age check, required fields)
+  - `DeviceKeyManager` class:
+    - DPAPI-protected key storage for PC
+    - Keys stored at `%LOCALAPPDATA%\Archimedes\device_keys.enc`
+- Added endpoints:
+  - `POST /crypto/v2/test` - encrypt/decrypt roundtrip test
+  - `GET /crypto/v2/publickey` - get X25519 public key
+  - `POST /crypto/v2/encrypt` - encrypt message for recipient
+  - `POST /crypto/v2/decrypt` - decrypt envelope with device key
+- Old RSA `/crypto-test` still works (version=1) for backward compatibility
+
+**Envelope Structure:**
+```json
+{
+  "Version": 2,
+  "DeviceId": "core-device",
+  "OperationId": "abc123...",
+  "Timestamp": 1771704347881,
+  "Nonce": "base64...",
+  "Ciphertext": "base64...",
+  "EphemeralPublicKey": "base64..."
+}
+```
+
+**Self-test:**
+```powershell
+# All builds
+cd core; dotnet build           # PASS
+cd ../net; npm run build        # PASS
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Unit tests
+cd core.tests; dotnet test
+# Passed! - Failed: 0, Passed: 12
+
+# Test modern crypto
+curl.exe -s -X POST http://localhost:5051/crypto/v2/test -d "secret message"
+# {
+#   "version": 2,
+#   "algorithm": "X25519+ChaCha20-Poly1305",
+#   "envelope": {...},
+#   "decrypted": "secret message",
+#   "ok": true,
+#   "plaintextNotInEnvelope": true
+# }
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13A-test"
+# {"id":"fs_...","ok":true,"mode":"real",...}
+```
+
+**Result:** PASS – Modern crypto with X25519+ChaCha20-Poly1305, DPAPI key protection, no plaintext in envelopes.
+
+---
+
+## Phase 13 COMPLETE ✅
+
+All sub-phases done:
+- 13.0: Baseline verification
+- 13.E: Log redaction + tests
+- 13.C: Durable outbox + retry + dedup
+- 13.D: Automatic crash recovery
+- 13.B: Encrypted DB (SQLCipher + DPAPI)
+- 13.A: Modern crypto (X25519 + AEAD)
+
+**Production-Ready Features:**
+- Zero sensitive data leakage in logs
+- Never lose tasks (outbox persistence)
+- Never duplicate actions (operationId dedup)
+- Auto-resume after crash
+- Encrypted local storage
+- Modern cryptography with forward secrecy
+- DPAPI key protection (Windows)
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:

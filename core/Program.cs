@@ -343,7 +343,76 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
     var (pub, priv) = Crypto.GenerateKeyPair();
     var enc = Crypto.EncryptBase64(message, pub);
     var dec = Crypto.DecryptBase64(enc, priv);
-    return Results.Json(new { encrypted = enc, decrypted = dec, ok = dec == message });
+    return Results.Json(new { version = 1, algorithm = "RSA-OAEP-SHA256", encrypted = enc, decrypted = dec, ok = dec == message });
+});
+
+var deviceKeyManager = new DeviceKeyManager();
+
+app.MapPost("/crypto/v2/test", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var message = await r.ReadToEndAsync();
+    if (string.IsNullOrEmpty(message)) message = "test secret message";
+
+    var keys = deviceKeyManager.GetOrCreateKeyPair();
+    var deviceId = "core-device";
+    var operationId = Guid.NewGuid().ToString("N");
+
+    var envelope = ModernCrypto.Encrypt(message, keys.PublicKey, deviceId, operationId);
+    var decrypted = ModernCrypto.Decrypt(envelope, keys.PrivateKey);
+
+    return Results.Json(new
+    {
+        version = 2,
+        algorithm = "X25519+ChaCha20-Poly1305",
+        envelope = new
+        {
+            envelope.Version,
+            envelope.DeviceId,
+            envelope.OperationId,
+            envelope.Timestamp,
+            envelope.Nonce,
+            ciphertextLength = envelope.Ciphertext.Length,
+            ephemeralPublicKeyLength = envelope.EphemeralPublicKey.Length
+        },
+        decrypted,
+        ok = decrypted == message,
+        plaintextNotInEnvelope = !envelope.Ciphertext.Contains(message)
+    });
+});
+
+app.MapGet("/crypto/v2/publickey", () =>
+{
+    var publicKey = deviceKeyManager.GetPublicKeyBase64();
+    return Results.Json(new { publicKey, algorithm = "X25519" });
+});
+
+app.MapPost("/crypto/v2/encrypt", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    
+    var message = json.RootElement.GetProperty("message").GetString() ?? "";
+    var recipientPublicKeyB64 = json.RootElement.GetProperty("recipientPublicKey").GetString() ?? "";
+    var deviceId = json.RootElement.TryGetProperty("deviceId", out var d) ? d.GetString() ?? "unknown" : "unknown";
+    var operationId = json.RootElement.TryGetProperty("operationId", out var o) ? o.GetString() ?? Guid.NewGuid().ToString("N") : Guid.NewGuid().ToString("N");
+
+    var recipientPublicKey = Convert.FromBase64String(recipientPublicKeyB64);
+    var envelopeJson = ModernCrypto.EncryptToJson(message, recipientPublicKey, deviceId, operationId);
+
+    return Results.Text(envelopeJson, "application/json");
+});
+
+app.MapPost("/crypto/v2/decrypt", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var envelopeJson = await r.ReadToEndAsync();
+    
+    var keys = deviceKeyManager.GetOrCreateKeyPair();
+    var decrypted = ModernCrypto.DecryptFromJson(envelopeJson, keys.PrivateKey);
+
+    return Results.Json(new { decrypted });
 });
 
 app.MapPost("/outbox/enqueue", async (HttpRequest req) =>
