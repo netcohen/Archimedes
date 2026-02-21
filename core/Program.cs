@@ -30,6 +30,7 @@ var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
 var llmAdapter = new LLMAdapter(httpClientFactory.CreateClient());
+var planner = new Planner(llmAdapter, policyEngine);
 
 SavedState? LoadStateFromDisk()
 {
@@ -403,6 +404,43 @@ app.MapPost("/llm/summarize", async (HttpRequest req) =>
         return Results.BadRequest("Content required");
     
     var result = await llmAdapter.Summarize(content);
+    return Results.Json(result);
+});
+
+app.MapPost("/planner/plan", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<PlannerRequest>(body);
+    if (request == null || string.IsNullOrWhiteSpace(request.UserPrompt))
+        return Results.BadRequest("userPrompt required");
+    
+    var taskId = request.TaskId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
+    var result = await planner.PlanTask(taskId, request.UserPrompt);
+    return Results.Json(result);
+});
+
+app.MapPost("/planner/plan-task/{id}", async (string id) =>
+{
+    var task = taskService.GetTask(id);
+    if (task == null)
+        return Results.NotFound(new { error = "Task not found" });
+    
+    var prompt = taskService.GetUserPrompt(id);
+    if (string.IsNullOrEmpty(prompt))
+        return Results.BadRequest(new { error = "Task has no prompt" });
+    
+    var result = await planner.PlanTask(id, prompt);
+    
+    if (result.Success && result.Plan != null)
+    {
+        taskService.SetPlan(id, new TaskPlanRequest
+        {
+            Intent = result.Intent,
+            Steps = result.Plan.Steps
+        });
+    }
+    
     return Results.Json(result);
 });
 

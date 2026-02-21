@@ -916,3 +916,68 @@ curl.exe -X POST http://localhost:5051/llm/summarize -d "Dashboard shows 4 recor
 ```
 
 **Result:** PASS – LLM adapter with heuristic fallback, no auto downloads, sanitized prompts.
+
+---
+
+## Phase 14.6 — Deterministic Planner ✅
+
+**Features:**
+- Planner uses LLM only for intent interpretation
+- Builds deterministic plans for known intents
+- Policy evaluation before plan execution
+- Supported intents:
+  - `TESTSITE_EXPORT` - Login, extract table, download CSV
+  - `TESTSITE_MONITOR` - Navigate, extract, screenshot, reschedule
+  - `LOGIN_FLOW` - Request credentials, navigate, detect login form
+  - `FILE_DOWNLOAD` - Navigate, download file
+- Plans include approval/secret steps based on policy decisions
+- Plan hashing for integrity verification
+
+**Endpoints:**
+- POST /planner/plan - Plan from user prompt (standalone)
+- POST /planner/plan-task/{id} - Plan for existing task
+
+**Plan Structure:**
+```json
+{
+  "success": true,
+  "intent": "TESTSITE_EXPORT",
+  "confidence": 0.8,
+  "plan": {
+    "version": 1,
+    "intent": "TESTSITE_EXPORT",
+    "steps": [
+      {"index": 1, "action": "browser.openUrl", "params": {...}},
+      {"index": 2, "action": "browser.fill", "params": {...}},
+      ...
+    ],
+    "hash": "8CE1B2ABB0071EF2"
+  },
+  "policyDecision": "AUTO_ALLOW",
+  "requiresApproval": false
+}
+```
+
+**Self-Test Commands:**
+```powershell
+# All builds pass
+cd core; dotnet build  # PASS
+cd ../core.tests; dotnet test  # 12/12 passed
+
+# Security check
+.\scripts\check-no-secrets.ps1  # PASS
+
+# Test TESTSITE_EXPORT intent
+curl.exe -X POST http://localhost:5051/planner/plan -H "Content-Type: application/json" -d '{"UserPrompt":"Download CSV from testsite"}'
+# => {"success":true,"intent":"TESTSITE_EXPORT","plan":{...7 steps...}}
+
+# Test TESTSITE_MONITOR intent
+curl.exe -X POST http://localhost:5051/planner/plan -H "Content-Type: application/json" -d '{"UserPrompt":"Monitor testsite for changes"}'
+# => {"success":true,"intent":"TESTSITE_MONITOR","plan":{...5 steps...}}
+
+# Test unsupported intent
+curl.exe -X POST http://localhost:5051/planner/plan -H "Content-Type: application/json" -d '{"UserPrompt":"Send email"}'
+# => {"success":false,"error":"Intent 'UNKNOWN' is not yet supported..."}
+```
+
+**Result:** PASS – Deterministic planner with LLM intent parsing and policy integration.
