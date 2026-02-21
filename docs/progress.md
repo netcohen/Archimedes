@@ -981,3 +981,62 @@ curl.exe -X POST http://localhost:5051/planner/plan -H "Content-Type: applicatio
 ```
 
 **Result:** PASS – Deterministic planner with LLM intent parsing and policy integration.
+
+---
+
+## Phase 14.7 — Smart Scheduler ✅
+
+**Features:**
+- Priority lanes: IMMEDIATE > SCHEDULED > BACKGROUND
+- Browser concurrency limit (default: 1)
+- Resource governor (CPU/memory checks)
+- Monitoring tasks with interval/jitter/backoff
+- Automatic task execution from queue
+- Backoff on failure for monitoring tasks
+
+**Endpoints:**
+- GET /scheduler/stats - Scheduler statistics
+- GET /availability - Resource availability for new tasks
+- POST /scheduler/enqueue/{taskId}?priority= - Enqueue task
+- POST /scheduler/monitoring - Register monitoring task
+- DELETE /scheduler/monitoring/{taskId} - Unregister monitoring
+- POST /scheduler/config - Configure resource limits
+
+**Resource Availability Response:**
+```json
+{
+  "browserSlotsAvailable": 1,
+  "browserSlotsTotal": 1,
+  "activeTaskCount": 0,
+  "immediateQueueSize": 0,
+  "scheduledQueueSize": 0,
+  "backgroundQueueSize": 0,
+  "cpuAvailable": true,
+  "memoryAvailable": true,
+  "canAcceptTasks": true
+}
+```
+
+**Self-Test Commands:**
+```powershell
+# All builds pass
+cd core; dotnet build  # PASS
+cd ../core.tests; dotnet test  # 12/12 passed
+
+# Security check
+.\scripts\check-no-secrets.ps1  # PASS
+
+# Test scheduler stats
+curl.exe http://localhost:5051/scheduler/stats
+# => {"running":true,"activeTasks":0,"immediateQueueSize":0,...}
+
+# Test availability
+curl.exe http://localhost:5051/availability
+# => {"browserSlotsAvailable":1,"canAcceptTasks":true,...}
+
+# Test config
+curl.exe -X POST http://localhost:5051/scheduler/config -d '{"MaxBrowserConcurrency":2}'
+# => {"ok":true,"stats":{...}}
+```
+
+**Result:** PASS – Smart scheduler with priority lanes, concurrency limits, and monitoring.

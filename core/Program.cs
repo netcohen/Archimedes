@@ -31,6 +31,8 @@ var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
 var llmAdapter = new LLMAdapter(httpClientFactory.CreateClient());
 var planner = new Planner(llmAdapter, policyEngine);
+var smartScheduler = new SmartScheduler(taskService, planner);
+smartScheduler.Start();
 
 SavedState? LoadStateFromDisk()
 {
@@ -442,6 +444,61 @@ app.MapPost("/planner/plan-task/{id}", async (string id) =>
     }
     
     return Results.Json(result);
+});
+
+app.MapGet("/scheduler/stats", () => Results.Json(smartScheduler.GetStats()));
+
+app.MapGet("/availability", () => Results.Json(smartScheduler.CheckAvailability()));
+
+app.MapPost("/scheduler/enqueue/{taskId}", (string taskId, string? priority) =>
+{
+    var p = priority?.ToUpper() switch
+    {
+        "SCHEDULED" => TaskPriority.SCHEDULED,
+        "BACKGROUND" => TaskPriority.BACKGROUND,
+        _ => TaskPriority.IMMEDIATE
+    };
+    smartScheduler.Enqueue(taskId, p);
+    return Results.Json(new { ok = true, taskId, priority = p.ToString() });
+});
+
+app.MapPost("/scheduler/monitoring", (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = r.ReadToEnd();
+    var request = JsonSerializer.Deserialize<MonitoringRequest>(body);
+    if (request == null || string.IsNullOrWhiteSpace(request.TaskId))
+        return Results.BadRequest("taskId required");
+    
+    smartScheduler.RegisterMonitoring(
+        request.TaskId,
+        request.IntervalMs,
+        request.MaxJitterMs ?? 5000,
+        request.BackoffMultiplier ?? 1.5);
+    
+    return Results.Json(new { ok = true, taskId = request.TaskId, intervalMs = request.IntervalMs });
+});
+
+app.MapDelete("/scheduler/monitoring/{taskId}", (string taskId) =>
+{
+    smartScheduler.UnregisterMonitoring(taskId);
+    return Results.Json(new { ok = true, taskId });
+});
+
+app.MapPost("/scheduler/config", (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = r.ReadToEnd();
+    var request = JsonSerializer.Deserialize<SchedulerConfigRequest>(body);
+    if (request == null)
+        return Results.BadRequest("Invalid config");
+    
+    smartScheduler.ConfigureLimits(
+        request.MaxBrowserConcurrency,
+        request.MaxCpuPercent,
+        request.MaxMemoryMB);
+    
+    return Results.Json(new { ok = true, stats = smartScheduler.GetStats() });
 });
 
 app.MapGet("/pairing-data", () =>
