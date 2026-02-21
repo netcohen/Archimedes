@@ -223,6 +223,51 @@ cd android
 
 ---
 
+## Phase 5.1 – Firestore Mode Detection Fix ✅
+
+**Status:** Complete
+
+**Problem:** Firestore was using in-memory mode (showing `mem_*` ids) even when Firebase credentials existed.
+
+**Done:**
+- Updated `net/.env.example` with new env vars:
+  - `FIREBASE_PROJECT_ID=archimedes-c76c3`
+  - `FIRESTORE_MODE=real|emulator|memory`
+- Rewrote `net/src/firestore.ts` with proper mode detection:
+  1. `FIRESTORE_MODE=memory` → use memory
+  2. `FIRESTORE_MODE=emulator` OR `FIRESTORE_EMULATOR_HOST` set → use emulator
+  3. `GOOGLE_APPLICATION_CREDENTIALS` set → use REAL Firestore (Admin SDK)
+  4. Fallback → memory with warning log
+- Updated `/firestore-test` to return `mode: "real|emulator|memory"`
+- ID prefix: `fs_` for real/emulator, `mem_` only for memory
+- Added `/v1/firebase/health` endpoint (GET/POST):
+  - Writes + reads a test doc
+  - Returns `{ok: true, mode: "real", docPath: "envelopes/..."}`
+
+**Self-test:**
+```powershell
+# Set credentials
+$env:GOOGLE_APPLICATION_CREDENTIALS = "$env:USERPROFILE\.secrets\archimedes\firebase-dev-sa.json"
+$env:FIRESTORE_MODE = "real"
+$env:FIREBASE_PROJECT_ID = "archimedes-c76c3"
+
+# Start server
+cd net; node dist/index.js
+# Output: [Firestore] Initialized REAL mode with project: archimedes-c76c3
+
+# Test health endpoint
+curl.exe http://localhost:5052/v1/firebase/health
+# Output: {"ok":true,"mode":"real","docPath":"envelopes/Qd8CrJCRyFMxCjFMwRsr"}
+
+# Test firestore-test endpoint
+curl.exe -X POST http://localhost:5052/firestore-test -d "test"
+# Output: {"id":"fs_7hyRXw8b3YpNYSYvRKJ3","ok":true,"mode":"real","readPayload":"test"}
+```
+
+**Result:** PASS – Real Firestore mode working, documents visible in Firebase console.
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:

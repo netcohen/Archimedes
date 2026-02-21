@@ -1,5 +1,5 @@
 import * as http from "http";
-import { getEnvelopeStore } from "./firestore";
+import { getEnvelopeStore, getCurrentMode, healthCheck } from "./firestore";
 
 const PORT = 5052;
 const CORE_URL = "http://localhost:5051";
@@ -104,17 +104,44 @@ const server = http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const store = await getEnvelopeStore();
+        const mode = store.getMode();
         const payload = body || "test envelope";
         const id = await store.write(payload);
         const doc = await store.read(id);
         const ok = doc !== null && doc.payload === payload;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id, ok, readPayload: doc?.payload }));
+        res.end(JSON.stringify({ id, ok, mode, readPayload: doc?.payload }));
       } catch (e) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: String(e) }));
       }
     });
+    return;
+  }
+  if (req.method === "GET" && req.url === "/v1/firebase/health") {
+    (async () => {
+      try {
+        const result = await healthCheck();
+        res.writeHead(result.ok ? 200 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, mode: getCurrentMode(), error: String(e) }));
+      }
+    })();
+    return;
+  }
+  if (req.method === "POST" && req.url === "/v1/firebase/health") {
+    (async () => {
+      try {
+        const result = await healthCheck();
+        res.writeHead(result.ok ? 200 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, mode: getCurrentMode(), error: String(e) }));
+      }
+    })();
     return;
   }
   res.writeHead(404);
