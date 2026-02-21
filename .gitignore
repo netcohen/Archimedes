@@ -1,0 +1,52 @@
+# Build outputs
+bin/
+obj/
+dist/
+build/
+*.dll
+*.exe
+*.pdb
+
+# Dependencies
+node_modules/
+packages/
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+*.user
+*.suo
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Android
+*.apk
+*.ap_
+*.aab
+.gradle/
+local.properties
+*.iml
+.idea/
+*.keystore
+
+# C#
+*.user
+*.suo
+*.cache
+*.dll
+*.exe
+*.pdb
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
