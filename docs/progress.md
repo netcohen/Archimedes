@@ -463,6 +463,68 @@ curl.exe -X POST http://localhost:5052/firestore-test -d "phase13D-test"
 
 ---
 
+### Phase 13.B – Encrypted DB (SQLCipher + DPAPI) ✅
+
+**Status:** Complete
+
+**Done:**
+- Added NuGet packages:
+  - `Microsoft.Data.Sqlite.Core` - SQLite base
+  - `SQLitePCLRaw.bundle_e_sqlcipher` - SQLCipher encryption
+  - `System.Security.Cryptography.ProtectedData` - DPAPI
+- Created `core/EncryptedStore.cs`:
+  - SQLCipher encrypted database at `%LOCALAPPDATA%\Archimedes\archimedes.db`
+  - Encryption key generated randomly (32 bytes)
+  - Key protected with DPAPI (`DataProtectionScope.CurrentUser`)
+  - Key stored at `%LOCALAPPDATA%\Archimedes\archimedes.key`
+  - Tables: jobs, runs, outbox, approvals, dedup
+  - Full CRUD operations for all entity types
+  - `IsEncrypted()` method to verify DB is not plaintext
+- Added endpoints:
+  - `GET /store/stats` - returns counts + isEncrypted flag
+  - `POST /store/test` - write/read roundtrip test
+
+**Self-test:**
+```powershell
+# All builds
+cd core; dotnet build           # PASS (with DPAPI warnings - Windows only)
+cd ../net; npm run build        # PASS
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Start Core - first run generates key
+dotnet run
+# [INFO] Generated new database encryption key (DPAPI protected)
+# [INFO] EncryptedStore initialized at C:\Users\...\archimedes.db
+
+# Test store
+curl.exe -s http://localhost:5051/store/stats
+# {"jobs":0,"runs":0,"outbox":0,"isEncrypted":true}
+
+curl.exe -s -X POST http://localhost:5051/store/test -d "test payload"
+# {"ok":true,"jobId":"...","isEncrypted":true,"stats":{"jobs":1,...}}
+
+# Kill and restart - verify persistence
+taskkill /F /IM dotnet.exe
+# Check DB header is NOT "SQLite format 3"
+$bytes = [IO.File]::ReadAllBytes("$env:LOCALAPPDATA\Archimedes\archimedes.db")
+[Text.Encoding]::ASCII.GetString($bytes[0..15])
+# Output: garbled characters (encrypted)
+
+# Restart Core
+dotnet run
+# [INFO] EncryptedStore initialized at ... (no "Generated new key")
+curl.exe -s http://localhost:5051/store/stats
+# {"jobs":1,...} - data persisted!
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13B-test"
+# {"id":"fs_...","ok":true,"mode":"real",...}
+```
+
+**Result:** PASS – Encrypted SQLCipher DB with DPAPI key protection, data persists across restarts.
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:

@@ -13,6 +13,9 @@ outboxService.StartWorker();
 
 var recoveryManager = new RecoveryManager();
 
+var encryptedStore = new EncryptedStore();
+encryptedStore.Initialize();
+
 var envelopeQueue = new Queue<string>();
 var pairingSessions = new Dictionary<string, (byte[] CorePrivateKey, byte[] DevicePublicKey)>();
 var pendingApprovals = new Dictionary<string, PendingApproval>();
@@ -386,6 +389,33 @@ app.MapPost("/outbox/drain", async () =>
 {
     var sent = await outboxService.DrainAsync();
     return Results.Json(new { drained = sent });
+});
+
+app.MapGet("/store/stats", () =>
+{
+    var stats = encryptedStore.GetStats();
+    return Results.Json(stats);
+});
+
+app.MapPost("/store/test", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    
+    var testJobId = Guid.NewGuid().ToString("N");
+    var testJob = new Job { Id = testJobId, Type = "test", Payload = body ?? "test" };
+    encryptedStore.SaveJob(testJob);
+    
+    var loaded = encryptedStore.GetJob(testJobId);
+    var stats = encryptedStore.GetStats();
+    
+    return Results.Json(new
+    {
+        ok = loaded != null && loaded.Payload == testJob.Payload,
+        jobId = testJobId,
+        isEncrypted = stats.IsEncrypted,
+        stats
+    });
 });
 
 var port = 5051;
