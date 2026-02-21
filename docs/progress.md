@@ -268,6 +268,34 @@ curl.exe -X POST http://localhost:5052/firestore-test -d "test"
 
 ---
 
+## Phase 13 – Hardening & Spec Compliance
+
+### Phase 13.0 – Baseline Verification ✅
+
+**Status:** Complete
+
+**Done:**
+- Core build: `dotnet build` → 0 errors
+- Net build: `npm ci && npm run build` → success
+- Android build: `gradlew.bat assembleDebug` → BUILD SUCCESSFUL
+- Firestore REAL mode test: `mode="real"`, id prefix `fs_`
+
+**Self-test:**
+```powershell
+# All builds
+cd core; dotnet build           # PASS
+cd ../net; npm ci; npm run build  # PASS
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13-test"
+# {"id":"fs_LyWhMCe8wo7lqzkvf7FM","ok":true,"mode":"real","readPayload":"phase13-test"}
+```
+
+**Result:** PASS
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:
