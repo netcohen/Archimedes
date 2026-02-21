@@ -99,6 +99,28 @@ Invoke-WebRequest -Uri http://localhost:5052/envelope  # Returns "Hello envelope
 
 ---
 
+## Phase 4.1 – Firebase Android Integration ✅
+
+**Status:** Complete
+
+**Done:**
+- Added Google Services plugin to `android/build.gradle.kts` (version 4.4.0)
+- Applied `com.google.gms.google-services` plugin in `android/app/build.gradle.kts`
+- Added Firebase BOM 32.7.0 with firebase-messaging-ktx and firebase-firestore-ktx
+- Verified `google-services.json` exists at `android/app/google-services.json`
+
+**Commands:**
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+```
+
+**Output:** BUILD SUCCESSFUL in 45s (34 tasks executed, processDebugGoogleServices ran)
+
+**Self-test:** PASS
+
+---
+
 ## Phase 5 – Firebase Integration ✅
 
 **Status:** Complete
