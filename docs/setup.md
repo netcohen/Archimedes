@@ -6,6 +6,32 @@
 - **Net:** Node.js 18+ and npm
 - **Android:** Android Studio (or SDK 34 + Gradle 8.x)
 
+## Secrets Setup
+
+1. Create a local secrets folder (not in repo):
+   ```
+   mkdir C:\Users\%USERNAME%\.secrets\archimedes
+   ```
+
+2. Copy the environment template:
+   ```bash
+   cp net/.env.example net/.env.local
+   ```
+
+3. Fill in real values in `net/.env.local`
+
+4. For Firebase, place your service account JSON in:
+   ```
+   C:\Users\%USERNAME%\.secrets\archimedes\firebase-service-account.json
+   ```
+
+5. Set environment variable:
+   ```powershell
+   $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\Users\$env:USERNAME\.secrets\archimedes\firebase-service-account.json"
+   ```
+
+See [security.md](security.md) for full secrets management guide.
+
 ## Build & Run
 
 ### Core (HTTP :5051)
@@ -38,3 +64,13 @@ Or open `android/` in Android Studio and run on emulator/device.
 - Cross-call: `http://localhost:5051/ping-net` → OK
 - Envelope: POST to `http://localhost:5051/send-envelope`, GET `http://localhost:5052/envelope`
 - Approval: `scripts/phase8-test.ps1` (Core must be running)
+
+## Pre-Commit Check
+
+Before committing, run the secrets scanner:
+
+```powershell
+.\scripts\check-no-secrets.ps1
+```
+
+This ensures no secrets are accidentally committed.

@@ -179,8 +179,30 @@ Invoke-WebRequest -Uri http://localhost:5052/envelope  # Returns "Hello envelope
 
 ---
 
+---
+
+## Phase 12.5 – Project Hygiene & Secrets Management ✅
+
+**Status:** Complete
+
+**Done:**
+- `docs/security.md` – Rules for secrets, allowed logging, storage locations
+- `net/.env.example` – Template with placeholders
+- `.gitignore` – Extended with secret file patterns
+- `.gitattributes` – LF line endings for code files
+- `scripts/check-no-secrets.ps1` – Scans repo for forbidden patterns
+- `docs/setup.md` – Updated with secrets setup guide
+
+**Self-test:**
+- `check-no-secrets.ps1` → PASS
+- Core build → BUILD SUCCEEDED
+- Net build → BUILD SUCCEEDED
+- Android build → BUILD SUCCESSFUL
+
+---
+
 ## MVP Complete ✅
 
-All 12 phases done. Final goal reached:
+All 12 phases + hygiene done. Final goal reached:
 
 User sends task → system runs → requests approval → user approves → system completes → result returned

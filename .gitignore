@@ -13,11 +13,22 @@ packages/
 .vscode/
 .idea/
 
-# Environment
+# Environment & Secrets
 .env
 .env.local
+.env.production
 *.user
 *.suo
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*secret*.json
+*-sa.json
+firebase-adminsdk*.json
+service-account*.json
+google-services.json
 
 # Logs
 *.log
