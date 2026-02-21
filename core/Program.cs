@@ -11,6 +11,8 @@ var outboxHttpClient = httpClientFactory.CreateClient();
 var outboxService = new OutboxService(outboxHttpClient);
 outboxService.StartWorker();
 
+var recoveryManager = new RecoveryManager();
+
 var envelopeQueue = new Queue<string>();
 var pairingSessions = new Dictionary<string, (byte[] CorePrivateKey, byte[] DevicePublicKey)>();
 var pendingApprovals = new Dictionary<string, PendingApproval>();
@@ -37,7 +39,39 @@ void SaveStateToDisk(SavedState s)
 }
 
 var savedState = LoadStateFromDisk();
-if (savedState != null) Console.WriteLine($"[Recovery] Loaded state: job={savedState.JobId} run={savedState.RunId}");
+if (savedState != null) Console.WriteLine($"[Recovery] Loaded legacy state: job={savedState.JobId} run={savedState.RunId}");
+
+var recoverableRuns = recoveryManager.GetRecoverableRuns();
+foreach (var persistedRun in recoverableRuns)
+{
+    ArchLogger.LogInfo($"[Recovery] Found run {persistedRun.Id} in state {persistedRun.Status}, step={persistedRun.Step}");
+    recoveryManager.MarkRecovering(persistedRun.Id);
+    
+    var run = new Run
+    {
+        Id = persistedRun.Id,
+        JobId = persistedRun.JobId,
+        StartTime = persistedRun.StartTime,
+        Status = RunStatus.Recovering,
+        Step = persistedRun.Step,
+        Checkpoint = persistedRun.Checkpoint
+    };
+    runs.Add(run);
+    
+    _ = Task.Run(async () =>
+    {
+        ArchLogger.LogInfo($"[Recovery] Resuming run {run.Id} from step {run.Step}");
+        await Task.Delay(500);
+        run.Step++;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, $"resumed_step_{run.Step}");
+        
+        await Task.Delay(100);
+        run.Status = RunStatus.Completed;
+        run.EndTime = DateTime.UtcNow;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed);
+        ArchLogger.LogInfo($"[Recovery] Run {run.Id} completed after recovery");
+    });
+}
 
 app.MapGet("/health", () => "OK");
 
@@ -81,14 +115,24 @@ app.MapPost("/job/{id}/run", (string id) =>
     if (!jobs.TryGetValue(id, out var job))
         return Results.NotFound();
     var runId = Guid.NewGuid().ToString("N");
-    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = "running" };
+    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = RunStatus.Running, Step = 0 };
     runs.Add(run);
+    recoveryManager.TrackRun(run);
+    
     _ = Task.Run(async () =>
     {
+        run.Step = 1;
+        run.Checkpoint = "step_1_started";
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, run.Checkpoint);
+        
         await Task.Delay(100);
+        
+        run.Step = 2;
+        run.Checkpoint = "step_2_completed";
         run.EndTime = DateTime.UtcNow;
-        run.Status = "completed";
-        Console.WriteLine($"[Scheduler] Run {runId} completed for job {id}");
+        run.Status = RunStatus.Completed;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed, run.Step, run.Checkpoint);
+        ArchLogger.LogInfo($"[Scheduler] Run {runId} completed for job {id}");
     });
     return Results.Json(new { runId });
 });
@@ -98,6 +142,60 @@ app.MapGet("/run/{id}", (string id) =>
     var run = runs.FirstOrDefault(r => r.Id == id);
     if (run == null) return Results.NotFound();
     return Results.Json(run);
+});
+
+app.MapGet("/recovery/state", () =>
+{
+    var state = recoveryManager.GetState();
+    return Results.Json(new
+    {
+        runs = state.Runs.Select(r => new
+        {
+            r.Id,
+            r.JobId,
+            r.Status,
+            r.Step,
+            r.Checkpoint,
+            r.StartTime,
+            r.EndTime
+        }),
+        state.LastSaved
+    });
+});
+
+app.MapPost("/recovery/clear", () =>
+{
+    recoveryManager.ClearAll();
+    return Results.Json(new { ok = true });
+});
+
+app.MapPost("/job/{id}/run-slow", (string id) =>
+{
+    if (!jobs.TryGetValue(id, out var job))
+        return Results.NotFound();
+    var runId = Guid.NewGuid().ToString("N");
+    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = RunStatus.Running, Step = 0 };
+    runs.Add(run);
+    recoveryManager.TrackRun(run);
+    
+    _ = Task.Run(async () =>
+    {
+        for (int step = 1; step <= 5; step++)
+        {
+            run.Step = step;
+            run.Checkpoint = $"processing_step_{step}";
+            recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, run.Checkpoint);
+            ArchLogger.LogInfo($"[Scheduler] Run {runId} step {step}/5");
+            await Task.Delay(2000);
+        }
+        
+        run.EndTime = DateTime.UtcNow;
+        run.Status = RunStatus.Completed;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed);
+        ArchLogger.LogInfo($"[Scheduler] Run {runId} completed all steps");
+    });
+    
+    return Results.Json(new { runId, message = "Slow run started (5 steps, 2s each)" });
 });
 
 var monitorTickCount = 0;

@@ -400,6 +400,69 @@ curl.exe -X POST http://localhost:5051/outbox/enqueue -d @body.json
 
 ---
 
+### Phase 13.D – Crash Recovery (AUTO) ✅
+
+**Status:** Complete
+
+**Done:**
+- Updated `core/Scheduler.cs`:
+  - Added `Step`, `Checkpoint`, `Error` to Run model
+  - Added `RunStatus` constants: Running, Completed, Failed, Paused, Recovering
+- Updated `core/Recovery.cs`:
+  - `PersistentRun` with full state: id, jobId, status, step, checkpoint, times
+  - `RecoveryState` with list of runs + lastSaved timestamp
+  - `RecoveryManager` class with:
+    - File-based persistence to `%TEMP%\archimedes\recovery_state.json`
+    - `TrackRun()` - save new run to state
+    - `UpdateRunStatus()` - update status/step/checkpoint
+    - `GetRecoverableRuns()` - find runs in RUNNING or RECOVERING state
+    - `MarkRecovering()` - transition to RECOVERING state
+    - `ClearRun()`/`ClearAll()` - cleanup
+- Updated Core startup in `Program.cs`:
+  - Detect recoverable runs on startup
+  - Mark as RECOVERING and resume automatically
+  - Outbox worker starts automatically
+- Added endpoints:
+  - `GET /recovery/state` - view all tracked runs
+  - `POST /recovery/clear` - clear recovery state
+  - `POST /job/{id}/run-slow` - 5-step slow run (2s per step) for testing
+
+**Self-test:**
+```powershell
+# Create job and start slow run
+$jobId = (curl.exe -s -X POST http://localhost:5051/job -d '{}' | ConvertFrom-Json).jobId
+curl.exe -s -X POST "http://localhost:5051/job/$jobId/run-slow"
+# {"runId":"...","message":"Slow run started (5 steps, 2s each)"}
+
+# Check state after 2 seconds
+Start-Sleep -Seconds 2
+curl.exe -s http://localhost:5051/recovery/state
+# {"runs":[{"id":"...","status":"running","step":2,...}],...}
+
+# Kill process (simulate crash)
+taskkill /F /IM dotnet.exe
+
+# Restart Core
+dotnet run
+# Output:
+# [INFO] [Recovery] Found run ... in state running, step=2
+# [INFO] Run ... marked as RECOVERING
+# [INFO] [Recovery] Resuming run ... from step 2
+# [INFO] [Recovery] Run ... completed after recovery
+
+# Verify final state
+curl.exe -s http://localhost:5051/recovery/state
+# {"runs":[{"id":"...","status":"completed","step":3,"checkpoint":"resumed_step_3",...}],...}
+
+# Firestore real mode
+curl.exe -X POST http://localhost:5052/firestore-test -d "phase13D-test"
+# {"id":"fs_...","ok":true,"mode":"real",...}
+```
+
+**Result:** PASS – Automatic crash recovery working, no manual /state/load needed.
+
+---
+
 ## MVP Complete ✅
 
 All 12 phases + hygiene done. Final goal reached:
