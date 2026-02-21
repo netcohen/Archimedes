@@ -657,3 +657,54 @@ curl.exe -s http://localhost:5051/recovery/state  # runs persisted
 ```
 
 **Result:** PASS – Baseline stable, ready for Phase 14.
+
+---
+
+## Phase 14.1 — Task Model + State Machine ✅
+
+**Features:**
+- AgentTask model with full state machine (QUEUED→PLANNING→RUNNING→PAUSED→DONE/FAILED)
+- Encrypted storage for userPrompt and plan (X25519+ChaCha20-Poly1305)
+- Task types: ONE_SHOT, MONITORING, RECURRING
+- Priority levels: IMMEDIATE, SCHEDULED, BACKGROUND
+- Versioned plans with hash verification
+- SQLCipher persistence with DPAPI key protection
+
+**Endpoints:**
+- POST /task - Create new task
+- GET /task/{id} - Get task details
+- GET /tasks?state=... - List tasks with optional state filter
+- POST /task/{id}/plan - Set execution plan
+- POST /task/{id}/run - Start task execution
+- POST /task/{id}/pause - Pause running task
+- POST /task/{id}/resume - Resume paused task
+- POST /task/{id}/cancel - Cancel task
+
+**Self-Test Commands:**
+```powershell
+# All builds pass
+cd core; dotnet build
+cd ../net; npm run build
+cd ../android; .\gradlew.bat assembleDebug
+
+# Create task
+curl.exe -X POST http://localhost:5051/task -H "Content-Type: application/json" -d '{"title":"Test","userPrompt":"test prompt","type":"ONE_SHOT"}'
+# => {"taskId":"...","state":"QUEUED",...}
+
+# Persistence test
+# Kill core, restart
+curl.exe http://localhost:5051/task/{id}  # Task persists
+
+# State transitions
+curl.exe -X POST http://localhost:5051/task/{id}/plan -d '{"intent":"TEST"}'
+curl.exe -X POST http://localhost:5051/task/{id}/run
+curl.exe -X POST http://localhost:5051/task/{id}/pause
+curl.exe -X POST http://localhost:5051/task/{id}/resume
+curl.exe -X POST http://localhost:5051/task/{id}/cancel
+
+# Security
+.\scripts\check-no-secrets.ps1  # PASS
+cd core.tests; dotnet test  # 12/12 passed
+```
+
+**Result:** PASS – Task model with encrypted persistence and full state machine.

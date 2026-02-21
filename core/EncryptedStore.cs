@@ -110,9 +110,33 @@ public class EncryptedStore : IDisposable
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                title TEXT NOT NULL,
+                user_prompt_encrypted TEXT,
+                user_prompt_hash TEXT,
+                user_prompt_length INTEGER DEFAULT 0,
+                type TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                schedule_json TEXT,
+                state TEXT NOT NULL,
+                current_step INTEGER DEFAULT 0,
+                error TEXT,
+                plan_json_encrypted TEXT,
+                plan_hash TEXT,
+                plan_version INTEGER DEFAULT 0,
+                artifacts_encrypted TEXT,
+                result_summary TEXT,
+                waiting_for_approval_id TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
             CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, next_retry);
             CREATE INDEX IF NOT EXISTS idx_outbox_operation ON outbox(operation_id);
+            CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+            CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
         ";
         cmd.ExecuteNonQuery();
     }
@@ -310,6 +334,153 @@ public class EncryptedStore : IDisposable
             Error = reader.IsDBNull(7) ? null : reader.GetString(7),
             LastAttemptAt = reader.IsDBNull(8) ? null : DateTime.Parse(reader.GetString(8))
         };
+    }
+
+    public void SaveTask(AgentTask task)
+    {
+        using var cmd = _connection!.CreateCommand();
+        cmd.CommandText = @"
+            INSERT OR REPLACE INTO tasks (
+                task_id, created_at, updated_at, title, 
+                user_prompt_encrypted, user_prompt_hash, user_prompt_length,
+                type, priority, schedule_json, state, current_step, error,
+                plan_json_encrypted, plan_hash, plan_version,
+                artifacts_encrypted, result_summary, waiting_for_approval_id
+            ) VALUES (
+                @taskId, @createdAt, @updatedAt, @title,
+                @userPromptEncrypted, @userPromptHash, @userPromptLength,
+                @type, @priority, @scheduleJson, @state, @currentStep, @error,
+                @planJsonEncrypted, @planHash, @planVersion,
+                @artifactsEncrypted, @resultSummary, @waitingForApprovalId
+            )
+        ";
+        cmd.Parameters.AddWithValue("@taskId", task.TaskId);
+        cmd.Parameters.AddWithValue("@createdAt", task.CreatedAtUtc.ToString("O"));
+        cmd.Parameters.AddWithValue("@updatedAt", task.UpdatedAtUtc?.ToString("O") ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@title", task.Title);
+        cmd.Parameters.AddWithValue("@userPromptEncrypted", (object?)task.UserPromptEncrypted ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@userPromptHash", (object?)task.UserPromptHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@userPromptLength", task.UserPromptLength);
+        cmd.Parameters.AddWithValue("@type", task.Type.ToString());
+        cmd.Parameters.AddWithValue("@priority", task.Priority.ToString());
+        cmd.Parameters.AddWithValue("@scheduleJson", task.Schedule != null ? 
+            System.Text.Json.JsonSerializer.Serialize(task.Schedule) : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@state", task.State.ToString());
+        cmd.Parameters.AddWithValue("@currentStep", task.CurrentStep);
+        cmd.Parameters.AddWithValue("@error", (object?)task.Error ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@planJsonEncrypted", (object?)task.PlanJsonEncrypted ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@planHash", (object?)task.PlanHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@planVersion", task.PlanVersion);
+        cmd.Parameters.AddWithValue("@artifactsEncrypted", (object?)task.ArtifactsEncrypted ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@resultSummary", (object?)task.ResultSummary ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@waitingForApprovalId", (object?)task.WaitingForApprovalId ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public AgentTask? GetTask(string taskId)
+    {
+        using var cmd = _connection!.CreateCommand();
+        cmd.CommandText = @"
+            SELECT task_id, created_at, updated_at, title,
+                   user_prompt_encrypted, user_prompt_hash, user_prompt_length,
+                   type, priority, schedule_json, state, current_step, error,
+                   plan_json_encrypted, plan_hash, plan_version,
+                   artifacts_encrypted, result_summary, waiting_for_approval_id
+            FROM tasks WHERE task_id = @taskId
+        ";
+        cmd.Parameters.AddWithValue("@taskId", taskId);
+        
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            return ReadTask(reader);
+        }
+        return null;
+    }
+
+    public List<AgentTask> GetTasks(TaskState? stateFilter = null)
+    {
+        var tasks = new List<AgentTask>();
+        using var cmd = _connection!.CreateCommand();
+        
+        if (stateFilter.HasValue)
+        {
+            cmd.CommandText = @"
+                SELECT task_id, created_at, updated_at, title,
+                       user_prompt_encrypted, user_prompt_hash, user_prompt_length,
+                       type, priority, schedule_json, state, current_step, error,
+                       plan_json_encrypted, plan_hash, plan_version,
+                       artifacts_encrypted, result_summary, waiting_for_approval_id
+                FROM tasks WHERE state = @state ORDER BY created_at DESC
+            ";
+            cmd.Parameters.AddWithValue("@state", stateFilter.Value.ToString());
+        }
+        else
+        {
+            cmd.CommandText = @"
+                SELECT task_id, created_at, updated_at, title,
+                       user_prompt_encrypted, user_prompt_hash, user_prompt_length,
+                       type, priority, schedule_json, state, current_step, error,
+                       plan_json_encrypted, plan_hash, plan_version,
+                       artifacts_encrypted, result_summary, waiting_for_approval_id
+                FROM tasks ORDER BY created_at DESC
+            ";
+        }
+        
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            tasks.Add(ReadTask(reader));
+        }
+        return tasks;
+    }
+
+    private static AgentTask ReadTask(SqliteDataReader reader)
+    {
+        var task = new AgentTask
+        {
+            TaskId = reader.GetString(0),
+            CreatedAtUtc = DateTime.Parse(reader.GetString(1)),
+            UpdatedAtUtc = reader.IsDBNull(2) ? null : DateTime.Parse(reader.GetString(2)),
+            Title = reader.GetString(3),
+            UserPromptEncrypted = reader.IsDBNull(4) ? null : reader.GetString(4),
+            UserPromptHash = reader.IsDBNull(5) ? null : reader.GetString(5),
+            UserPromptLength = reader.GetInt32(6),
+            CurrentStep = reader.GetInt32(11),
+            Error = reader.IsDBNull(12) ? null : reader.GetString(12),
+            PlanJsonEncrypted = reader.IsDBNull(13) ? null : reader.GetString(13),
+            PlanHash = reader.IsDBNull(14) ? null : reader.GetString(14),
+            PlanVersion = reader.GetInt32(15),
+            ArtifactsEncrypted = reader.IsDBNull(16) ? null : reader.GetString(16),
+            ResultSummary = reader.IsDBNull(17) ? null : reader.GetString(17),
+            WaitingForApprovalId = reader.IsDBNull(18) ? null : reader.GetString(18)
+        };
+        
+        if (Enum.TryParse<TaskType>(reader.GetString(7), out var type))
+            task.Type = type;
+        if (Enum.TryParse<TaskPriority>(reader.GetString(8), out var priority))
+            task.Priority = priority;
+        if (!reader.IsDBNull(9))
+            task.Schedule = System.Text.Json.JsonSerializer.Deserialize<TaskSchedule>(reader.GetString(9));
+        if (Enum.TryParse<TaskState>(reader.GetString(10), out var state))
+            task.State = state;
+        
+        return task;
+    }
+
+    public int GetTaskCount(TaskState? stateFilter = null)
+    {
+        using var cmd = _connection!.CreateCommand();
+        if (stateFilter.HasValue)
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM tasks WHERE state = @state";
+            cmd.Parameters.AddWithValue("@state", stateFilter.Value.ToString());
+        }
+        else
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM tasks";
+        }
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     public bool IsEncrypted()

@@ -347,6 +347,121 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
 });
 
 var deviceKeyManager = new DeviceKeyManager();
+var taskService = new TaskService(encryptedStore, deviceKeyManager);
+
+app.MapPost("/task", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<CreateTaskRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (request == null)
+        return Results.BadRequest("Invalid request");
+    
+    var task = taskService.CreateTask(request);
+    return Results.Json(TaskResponse.FromTask(task));
+});
+
+app.MapGet("/task/{id}", (string id) =>
+{
+    var task = taskService.GetTask(id);
+    if (task == null)
+        return Results.NotFound();
+    return Results.Json(TaskResponse.FromTask(task));
+});
+
+app.MapGet("/tasks", (HttpRequest req) =>
+{
+    TaskState? stateFilter = null;
+    if (req.Query.TryGetValue("state", out var stateVal) && 
+        Enum.TryParse<TaskState>(stateVal.FirstOrDefault(), true, out var parsed))
+    {
+        stateFilter = parsed;
+    }
+    
+    var tasks = taskService.GetTasks(stateFilter);
+    return Results.Json(tasks.Select(TaskResponse.FromTask));
+});
+
+app.MapPost("/task/{id}/plan", async (string id, HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<TaskPlanRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (request == null)
+        return Results.BadRequest("Invalid plan request");
+    
+    try
+    {
+        var task = taskService.SetPlan(id, request);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/run", (string id) =>
+{
+    try
+    {
+        var task = taskService.StartRun(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/pause", (string id) =>
+{
+    try
+    {
+        var task = taskService.Pause(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/resume", (string id) =>
+{
+    try
+    {
+        var task = taskService.Resume(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/cancel", (string id) =>
+{
+    try
+    {
+        var task = taskService.Cancel(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
 
 app.MapPost("/crypto/v2/test", async (HttpRequest req) =>
 {
