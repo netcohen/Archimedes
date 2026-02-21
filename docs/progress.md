@@ -847,3 +847,72 @@ curl.exe -X POST http://localhost:5051/v2/approval/request/captcha -d '{"taskId"
 ```
 
 **Result:** PASS – Secret/captcha loop with simulator and encrypted E2E transport.
+
+---
+
+## Phase 14.5 — Local LLM Adapter (Ollama) ✅
+
+**Features:**
+- Ollama adapter for local LLM inference
+- Intent interpretation: parse user prompts into structured intents/slots
+- Summarization: generate summaries with bullet insights and risks
+- Heuristic fallback when LLM unavailable (always works)
+- Schema-validated JSON responses
+- Sanitized prompts (passwords, tokens, API keys redacted before LLM)
+- Only prompt hashes logged (no raw prompts)
+- 8-second timeout with automatic fallback
+- NO auto model downloads - manual install only
+
+**Configuration (env vars):**
+- `LLM_BASE_URL` - Ollama API URL (default: http://127.0.0.1:11434)
+- `LLM_MODEL` - Model name (default: llama3.2:3b)
+
+**Endpoints:**
+- GET /llm/health - Check LLM availability
+- POST /llm/interpret - Parse intent from natural language
+- POST /llm/summarize - Generate summary with insights
+
+**Heuristic Fallback Intents:**
+- TESTSITE_EXPORT - Keywords: testsite, dashboard, export, download, csv
+- TESTSITE_MONITOR - Keywords: monitor, watch, check
+- FILE_DOWNLOAD - Keywords: download, save, fetch
+- WEB_BROWSE - Keywords: open, navigate, go, visit
+- DATA_EXTRACT - Keywords: extract, scrape, get, find
+- LOGIN_FLOW - Keywords: login, sign in, authenticate
+- UNKNOWN - Default fallback
+
+**Documentation:**
+- Created `docs/llm.md` - Manual installation and usage guide
+- Created `scripts/llm-smoke.ps1` - Smoke test script
+
+**Self-Test Commands:**
+```powershell
+# All builds pass
+cd core; dotnet build  # PASS
+cd ../net; npm run build  # PASS
+cd ../android; .\gradlew.bat assembleDebug  # PASS
+
+# Security check
+.\scripts\check-no-secrets.ps1  # PASS
+
+# Unit tests
+cd core.tests; dotnet test  # 12/12 passed
+
+# LLM health (fallback mode - Ollama not running)
+curl.exe http://localhost:5051/llm/health
+# => {"available":false,"model":"llama3.2:3b","runtime":"ollama","error":"...refused..."}
+
+# Interpret endpoint (uses heuristic fallback)
+curl.exe -X POST http://localhost:5051/llm/interpret -d "Download the CSV from testsite"
+# => {"intent":"TESTSITE_EXPORT","slots":{},"confidence":0.8,"isHeuristicFallback":true}
+
+# Summarize endpoint (uses heuristic fallback)
+curl.exe -X POST http://localhost:5051/llm/summarize -d "Dashboard shows 4 records..."
+# => {"shortSummary":"Dashboard shows 4 records.","bulletInsights":[...],"isHeuristicFallback":true}
+
+# LLM smoke test script
+.\scripts\llm-smoke.ps1
+# => PASS: LLM smoke test completed
+```
+
+**Result:** PASS – LLM adapter with heuristic fallback, no auto downloads, sanitized prompts.

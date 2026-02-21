@@ -29,6 +29,7 @@ var deviceKeyManager = new DeviceKeyManager();
 var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
+var llmAdapter = new LLMAdapter(httpClientFactory.CreateClient());
 
 SavedState? LoadStateFromDisk()
 {
@@ -375,6 +376,34 @@ app.MapPost("/v2/approval/simulator/disable", () =>
 {
     approvalService.DisableSimulator();
     return Results.Json(new { ok = true, mode = "real" });
+});
+
+app.MapGet("/llm/health", async () =>
+{
+    var result = await llmAdapter.HealthCheck();
+    return Results.Json(result);
+});
+
+app.MapPost("/llm/interpret", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var prompt = await r.ReadToEndAsync();
+    if (string.IsNullOrWhiteSpace(prompt))
+        return Results.BadRequest("Prompt required");
+    
+    var result = await llmAdapter.Interpret(prompt);
+    return Results.Json(result);
+});
+
+app.MapPost("/llm/summarize", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var content = await r.ReadToEndAsync();
+    if (string.IsNullOrWhiteSpace(content))
+        return Results.BadRequest("Content required");
+    
+    var result = await llmAdapter.Summarize(content);
+    return Results.Json(result);
 });
 
 app.MapGet("/pairing-data", () =>
