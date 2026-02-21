@@ -18,6 +18,7 @@ $forbiddenFiles = @(
     "*credentials*.json",
     "*secret*.json",
     "*-sa.json",
+    "*server-key*",
     "firebase-adminsdk*.json",
     "service-account*.json",
     ".env.local",

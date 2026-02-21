@@ -20,15 +20,17 @@
 
 3. Fill in real values in `net/.env.local`
 
-4. For Firebase, place your service account JSON in:
+4. For Firebase (Firestore + FCM HTTP v1), place your service account JSON in:
    ```
-   C:\Users\%USERNAME%\.secrets\archimedes\firebase-service-account.json
+   C:\Users\%USERNAME%\.secrets\archimedes\firebase-dev-sa.json
    ```
 
 5. Set environment variable:
    ```powershell
-   $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\Users\$env:USERNAME\.secrets\archimedes\firebase-service-account.json"
+   $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\Users\$env:USERNAME\.secrets\archimedes\firebase-dev-sa.json"
    ```
+
+> **Note:** FCM uses HTTP v1 API with OAuth2. No legacy server key needed.
 
 See [security.md](security.md) for full secrets management guide.
 

@@ -24,9 +24,8 @@ Store secrets in a local-only folder outside the repo:
 
 ```
 C:\Users\<username>\.secrets\archimedes\
-├── firebase-service-account.json
-├── fcm-server-key.txt
-└── .env.local
+├── firebase-dev-sa.json    # Firebase service account (for FCM HTTP v1 + Firestore)
+└── .env.local              # Local environment overrides
 ```
 
 Then symlink or copy to the appropriate project folder, or set environment variables.
@@ -52,7 +51,7 @@ cp net/.env.example net/.env.local
 
 The script `scripts/check-no-secrets.ps1` scans for:
 
-- Files: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*credentials*.json`, `*secret*`, `*-sa.json`
+- Files: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*credentials*.json`, `*secret*`, `*-sa.json`, `*server-key*`
 - Patterns: `AKIA`, `sk_live_`, `-----BEGIN PRIVATE KEY-----`, `-----BEGIN RSA PRIVATE KEY-----`
 - Firebase: `firebase-adminsdk`, `service-account`
 
@@ -64,9 +63,11 @@ Run before committing:
 
 ## Firebase / FCM
 
-- **Service account JSON**: Store in `~/.secrets/archimedes/firebase-service-account.json`
-- **Set env var**: `GOOGLE_APPLICATION_CREDENTIALS=C:\Users\<user>\.secrets\archimedes\firebase-service-account.json`
-- **FCM server key**: Store in `~/.secrets/archimedes/fcm-server-key.txt`, load at runtime
+**Use FCM HTTP v1 API with OAuth2 (service account) only.** Legacy server keys are deprecated.
+
+- **Service account JSON**: Store in `~/.secrets/archimedes/firebase-dev-sa.json`
+- **Set env var**: `GOOGLE_APPLICATION_CREDENTIALS=C:\Users\<user>\.secrets\archimedes\firebase-dev-sa.json`
+- **FCM HTTP v1**: Uses OAuth2 tokens from the service account (no separate key file needed)
 
 ## Android
 
