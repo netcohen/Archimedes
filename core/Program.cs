@@ -348,6 +348,7 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
 
 var deviceKeyManager = new DeviceKeyManager();
 var taskService = new TaskService(encryptedStore, deviceKeyManager);
+var policyEngine = new PolicyEngine();
 
 app.MapPost("/task", async (HttpRequest req) =>
 {
@@ -461,6 +462,60 @@ app.MapPost("/task/{id}/cancel", (string id) =>
     {
         return Results.BadRequest(ex.Message);
     }
+});
+
+app.MapGet("/policy/rules", () =>
+{
+    var rules = policyEngine.GetRules();
+    return Results.Json(rules.Select(r => new
+    {
+        r.Id,
+        r.Description,
+        r.DomainPattern,
+        r.DomainAllowlist,
+        r.DomainDenylist,
+        entityScope = r.EntityScope?.ToString(),
+        actionKind = r.ActionKind?.ToString(),
+        decision = r.Decision.ToString(),
+        r.Priority,
+        r.Enabled
+    }));
+});
+
+app.MapPost("/policy/rules", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var rule = JsonSerializer.Deserialize<PolicyRule>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (rule == null)
+        return Results.BadRequest("Invalid rule");
+    
+    policyEngine.AddRule(rule);
+    return Results.Json(new { ok = true, ruleId = rule.Id });
+});
+
+app.MapDelete("/policy/rules/{id}", (string id) =>
+{
+    var removed = policyEngine.RemoveRule(id);
+    return Results.Json(new { ok = removed });
+});
+
+app.MapPost("/policy/evaluate", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<PolicyEvaluationRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (request == null)
+        return Results.BadRequest("Invalid request");
+    
+    var result = policyEngine.Evaluate(request);
+    return Results.Json(new
+    {
+        decision = result.Decision.ToString(),
+        result.MatchedRuleId,
+        result.Reason,
+        result.EvaluatedRules
+    });
 });
 
 app.MapPost("/crypto/v2/test", async (HttpRequest req) =>

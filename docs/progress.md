@@ -708,3 +708,46 @@ cd core.tests; dotnet test  # 12/12 passed
 ```
 
 **Result:** PASS – Task model with encrypted persistence and full state machine.
+
+---
+
+## Phase 14.2 — Policy Engine ✅
+
+**Features:**
+- Policy decisions: AUTO_ALLOW, REQUIRE_APPROVAL, REQUIRE_SECRET, REQUIRE_CAPTCHA, DENY
+- Domain allowlist/denylist with wildcard support (*.example.com)
+- Entity scope: SELF, CHILD
+- Action kinds: READ_ONLY, WRITE, MONEY, IDENTITY
+- Time windows with day-of-week and time range filtering
+- Priority-based rule matching
+- Default rules: money/identity require approval, testsite allowed, read-only allowed
+
+**Endpoints:**
+- GET /policy/rules - List all policy rules
+- POST /policy/rules - Add/update a rule
+- DELETE /policy/rules/{id} - Remove a rule
+- POST /policy/evaluate - Evaluate a request against policy
+
+**Self-Test Commands:**
+```powershell
+# Get default rules
+curl.exe http://localhost:5051/policy/rules
+# => [...6 default rules...]
+
+# Evaluate testsite (AUTO_ALLOW)
+curl.exe -X POST http://localhost:5051/policy/evaluate -d '{"domain":"localhost:5052","actionKind":"READ_ONLY"}'
+# => {"decision":"AUTO_ALLOW","matchedRuleId":"testsite-allow",...}
+
+# Evaluate money action (REQUIRE_APPROVAL)
+curl.exe -X POST http://localhost:5051/policy/evaluate -d '{"domain":"bank.com","actionKind":"MONEY"}'
+# => {"decision":"REQUIRE_APPROVAL","matchedRuleId":"default-deny-money",...}
+
+# Add DENY rule
+curl.exe -X POST http://localhost:5051/policy/rules -d '{"id":"deny-malicious","domainAllowlist":["evil.com"],"decision":"DENY","priority":1}'
+
+# Test DENY
+curl.exe -X POST http://localhost:5051/policy/evaluate -d '{"domain":"evil.com"}'
+# => {"decision":"DENY","matchedRuleId":"deny-malicious",...}
+```
+
+**Result:** PASS – Policy engine blocks/allows based on domain, action kind, and custom rules.
