@@ -142,70 +142,31 @@ public class Planner
             });
         }
         
-        // Navigate to login
+        // HTTP-based testsite workflow (no browser required)
         steps.Add(new PlanStep
         {
-            Action = "browser.openUrl",
-            Params = new Dictionary<string, object> { ["url"] = $"{baseUrl}/testsite/login" },
-            Description = "Navigate to testsite login page"
-        });
-        
-        // Check if secret required for login
-        if (policy.Decision == PolicyDecision.REQUIRE_SECRET)
-        {
-            steps.Add(new PlanStep
-            {
-                Action = "approval.requestSecret",
-                Params = new Dictionary<string, object> { ["prompt"] = "Enter testsite password" },
-                Description = "Request login credentials from user"
-            });
-        }
-        
-        // Fill login form
-        steps.Add(new PlanStep
-        {
-            Action = "browser.fill",
-            Params = new Dictionary<string, object> { ["selector"] = "#username", ["value"] = "testuser" },
-            Description = "Fill username field"
+            Action = "http.login",
+            Params = new Dictionary<string, object> 
+            { 
+                ["url"] = $"{baseUrl}/testsite/api/login",
+                ["username"] = "test",
+                ["password"] = "test"
+            },
+            Description = "Login to testsite API"
         });
         
         steps.Add(new PlanStep
         {
-            Action = "browser.fill",
-            Params = new Dictionary<string, object> { ["selector"] = "#password", ["valueFrom"] = "secret" },
-            Description = "Fill password field (from secret if available)"
+            Action = "http.fetchData",
+            Params = new Dictionary<string, object> { ["url"] = $"{baseUrl}/testsite/api/data" },
+            Description = "Fetch table data from API"
         });
         
-        // Submit login
         steps.Add(new PlanStep
         {
-            Action = "browser.click",
-            Params = new Dictionary<string, object> { ["selector"] = "#loginBtn" },
-            Description = "Click login button"
-        });
-        
-        // Wait for dashboard
-        steps.Add(new PlanStep
-        {
-            Action = "browser.waitFor",
-            Params = new Dictionary<string, object> { ["selector"] = "#dataTable", ["timeoutMs"] = 5000 },
-            Description = "Wait for dashboard data table to load"
-        });
-        
-        // Extract table data
-        steps.Add(new PlanStep
-        {
-            Action = "browser.extractTable",
-            Params = new Dictionary<string, object> { ["selector"] = "#dataTable" },
-            Description = "Extract data table contents"
-        });
-        
-        // Download CSV
-        steps.Add(new PlanStep
-        {
-            Action = "browser.downloadFile",
-            Params = new Dictionary<string, object> { ["selector"] = "#downloadLink", ["filename"] = "export.csv" },
-            Description = "Download CSV export file"
+            Action = "http.downloadCsv",
+            Params = new Dictionary<string, object> { ["url"] = $"{baseUrl}/testsite/api/csv" },
+            Description = "Download CSV export"
         });
         
         return steps;

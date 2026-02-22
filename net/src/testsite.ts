@@ -62,6 +62,13 @@ const csvData = `ID,Name,Status,Value
 3,Gamma,Active,175
 4,Delta,Inactive,50`;
 
+const tableData = [
+  { id: 1, name: "Alpha", status: "Active", value: 100 },
+  { id: 2, name: "Beta", status: "Pending", value: 250 },
+  { id: 3, name: "Gamma", status: "Active", value: 175 },
+  { id: 4, name: "Delta", status: "Inactive", value: 50 },
+];
+
 export function handleTestsite(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -121,6 +128,57 @@ export function handleTestsite(
       "Content-Disposition": 'attachment; filename="data.csv"',
     });
     res.end(csvData);
+    return true;
+  }
+
+  // JSON API endpoints for programmatic access (no browser required)
+  if (path === "/testsite/api/login" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const creds = JSON.parse(body);
+        const valid = creds.username === "test" && creds.password === "test";
+        if (valid) {
+          const token = crypto.randomBytes(16).toString("hex");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, token, message: "Login successful" }));
+        } else {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: "Invalid credentials" }));
+        }
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, error: "Invalid JSON" }));
+      }
+    });
+    return true;
+  }
+
+  if (path === "/testsite/api/data") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ rows: tableData, total: tableData.length }));
+    return true;
+  }
+
+  if (path === "/testsite/api/csv") {
+    res.writeHead(200, { "Content-Type": "text/csv" });
+    res.end(csvData);
+    return true;
+  }
+
+  if (path === "/testsite/api/info") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      name: "Testsite",
+      version: "1.0",
+      endpoints: [
+        "POST /testsite/api/login",
+        "GET /testsite/api/data",
+        "GET /testsite/api/csv",
+        "GET /testsite/api/info"
+      ]
+    }));
     return true;
   }
 
