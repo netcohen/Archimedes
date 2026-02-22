@@ -67,6 +67,54 @@ Or open `android/` in Android Studio and run on emulator/device.
 - Envelope: POST to `http://localhost:5051/send-envelope`, GET `http://localhost:5052/envelope`
 - Approval: `scripts/phase8-test.ps1` (Core must be running)
 
+## Testing
+
+### Quick E2E Tests (< 2 minutes)
+
+Run the full E2E test suite (requires Core + Net running):
+
+```powershell
+# Start services first
+cd core; dotnet run &
+cd net; npm start &
+
+# Run E2E tests
+.\scripts\e2e.ps1
+```
+
+Expected output: `Passed: 21, Failed: 0`
+
+### Unit Tests
+
+```powershell
+cd core.tests
+dotnet test
+```
+
+### Soak Test (12 hours)
+
+For long-running stability testing:
+
+```powershell
+# Start services in separate terminals
+cd core; dotnet run
+cd net; npm start
+
+# Run soak test (default 12 hours)
+.\scripts\run-soak.ps1
+
+# Or custom duration
+.\scripts\run-soak.ps1 -DurationHours 1
+```
+
+Logs are written to `logs/soak/`.
+
+### Security Regression
+
+```powershell
+.\scripts\phase14-security.ps1
+```
+
 ## Pre-Commit Check
 
 Before committing, run the secrets scanner:

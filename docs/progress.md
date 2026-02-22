@@ -1181,3 +1181,131 @@ curl.exe -X POST http://localhost:5051/task -d '{"Title":"Test","UserPrompt":"Lo
 ```
 
 **Result:** PASS – Tasks no longer stuck, prompts properly persisted and validated.
+
+---
+
+## Phase 14.2 – EXECUTION ENGINE HOTFIX + TEST MARATHON ✅
+
+**Issue:** Tasks enter RUNNING but never progress: currentStep=0, planHash=null, no updatedAtUtc change.
+
+### A) TaskRunner: Execution Loop ✅
+
+Created `core/TaskRunner.cs` - a background service that advances RUNNING tasks:
+
+- **Runner Loop (configurable interval, default 1000ms):**
+  - Loads RUNNING tasks from persistent store
+  - For each task: generates plan if planHash is null, executes 1 step per tick
+  - Persists: updatedAtUtc, currentStep increment, artifacts
+  - Handles approval states (WAITING_FOR_APPROVAL, WAITING_SECRET, WAITING_CAPTCHA)
+  - On completion: sets DONE with resultSummary
+  - On exception: sets FAILED with structured error
+
+- **Watchdog (default 300s):**
+  - Checks every 10 seconds for stuck RUNNING tasks
+  - Auto-fails tasks with no progress and no pending approval
+  - Active by default (configurable via `/scheduler/config`)
+
+- **Concurrency Protection:**
+  - Single-instance execution per task via ConcurrentDictionary
+  - Max tasks per tick limit (default 10)
+  - Tick budget limit (default 500ms)
+
+### B) Deterministic Planner Fallback ✅
+
+Updated `core/Planner.cs` with HTTP-based testsite workflow:
+
+- **TESTSITE_EXPORT intent now uses:**
+  - `http.login` - POST to /testsite/api/login with test credentials
+  - `http.fetchData` - GET /testsite/api/data (JSON)
+  - `http.downloadCsv` - GET /testsite/api/csv
+
+- **No browser automation required** - pure HTTP client calls
+- Works without LLM (heuristic intent detection)
+
+Added to `net/src/testsite.ts`:
+- `POST /testsite/api/login` - JSON login endpoint
+- `GET /testsite/api/data` - JSON data endpoint
+- `GET /testsite/api/csv` - CSV download endpoint
+- `GET /testsite/api/info` - API info endpoint
+
+### C) Debug Endpoints ✅
+
+- **GET /task/{id}/trace** - Returns state, currentStep, plan summary, trace logs (redacted)
+- **GET /tasks/running** - List running tasks with age, watchdog ETA, execution status
+- **GET /health/deep** - Runner heartbeat, watchdog status, Net health, task counts
+
+### D) Fixed /scheduler/config ✅
+
+- **GET /scheduler/config** - Returns current config (200)
+- **POST /scheduler/config** - Accepts partial updates with validation
+  - Returns 400 with clear message on invalid input (not 500)
+  - Config keys: runnerIntervalMs, watchdogSeconds, maxTasksPerTick, tickBudgetMs
+
+### E) Tests ✅
+
+Created comprehensive test scripts:
+
+- **scripts/e2e.ps1** - Full E2E test suite (21 tests)
+  - Health checks, scheduler config, task lifecycle
+  - Debug endpoints, testsite API, input validation
+  - Concurrent task handling
+
+- **scripts/run-soak.ps1** - 12-hour soak test
+  - Creates tasks every 2 minutes
+  - Health checks every 5 minutes
+  - Logs to local folder, generates summary JSON
+
+### Self-Test Commands
+
+```powershell
+# Full E2E test suite (21 tests)
+.\scripts\e2e.ps1
+# => Passed: 21, Failed: 0, Duration: 21.6s
+
+# Secrets check
+.\scripts\check-no-secrets.ps1
+# => PASS: No secrets detected
+
+# Manual verification
+curl.exe -s http://localhost:5051/scheduler/config
+# => {"runnerIntervalMs":1000,"watchdogSeconds":300,...}
+
+curl.exe -s http://localhost:5051/health/deep
+# => {"status":"ok","runner":{"running":true,"watchdogEnabled":true,...}}
+
+# Create and run task
+$task = curl.exe -s -X POST http://localhost:5051/task -d '{"Title":"Test","UserPrompt":"Login to testsite and download CSV"}'
+curl.exe -s -X POST http://localhost:5051/task/$taskId/run
+# Wait 10 seconds...
+curl.exe -s http://localhost:5051/task/$taskId
+# => {"state":"DONE","currentStep":3,"planHash":"0AD13DF5A48DBD49","resultSummary":"...First 3 rows: Alpha..."}
+```
+
+### Files Changed
+
+- `core/TaskRunner.cs` - NEW: Background execution service
+- `core/Planner.cs` - HTTP-based testsite steps
+- `core/TaskService.cs` - Allow SetPlan in RUNNING state
+- `core/Program.cs` - TaskRunner init, debug endpoints, config fix
+- `net/src/testsite.ts` - JSON API endpoints
+- `scripts/e2e.ps1` - NEW: E2E test suite
+- `scripts/run-soak.ps1` - NEW: 12-hour soak test
+
+### Acceptance Criteria
+
+| Criterion | Status |
+|-----------|--------|
+| Core+Net builds succeed | ✅ |
+| scripts/check-no-secrets.ps1 PASS | ✅ |
+| scripts/e2e.ps1 PASS | ✅ (21/21) |
+| Task completes with planHash != null | ✅ |
+| Task completes with currentStep > 0 | ✅ |
+| Task reaches DONE within 60s | ✅ (~4s) |
+| resultSummary contains first 3 CSV rows | ✅ |
+| /health/deep shows runner heartbeat | ✅ |
+| /health/deep shows watchdog enabled | ✅ |
+| GET /scheduler/config returns config | ✅ |
+| POST /scheduler/config invalid returns 400 | ✅ |
+| /task/{id}/trace returns diagnostics | ✅ |
+
+**Result:** PASS – Execution engine fully operational, tasks complete end-to-end.
