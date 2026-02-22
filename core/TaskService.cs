@@ -63,7 +63,8 @@ public class TaskService
         var task = _store.GetTask(taskId);
         if (task == null) return null;
         
-        if (task.State != TaskState.QUEUED && task.State != TaskState.PLANNING)
+        // Allow setting plan in QUEUED, PLANNING, or RUNNING (for TaskRunner to generate plan)
+        if (task.State != TaskState.QUEUED && task.State != TaskState.PLANNING && task.State != TaskState.RUNNING)
         {
             throw new InvalidOperationException($"Cannot set plan in state {task.State}");
         }
@@ -75,7 +76,12 @@ public class TaskService
         };
         plan.ComputeHash();
         
-        task.State = TaskState.PLANNING;
+        // Only change state to PLANNING if it was QUEUED; keep RUNNING if already RUNNING
+        if (task.State == TaskState.QUEUED)
+        {
+            task.State = TaskState.PLANNING;
+        }
+        
         task.PlanJsonEncrypted = EncryptString(JsonSerializer.Serialize(plan));
         task.PlanHash = plan.Hash;
         task.PlanVersion = plan.Version;

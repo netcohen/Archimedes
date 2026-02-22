@@ -34,6 +34,9 @@ var planner = new Planner(llmAdapter, policyEngine);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
 
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient());
+taskRunner.Start();
+
 SavedState? LoadStateFromDisk()
 {
     if (!File.Exists(statePath)) return null;
@@ -485,21 +488,149 @@ app.MapDelete("/scheduler/monitoring/{taskId}", (string taskId) =>
     return Results.Json(new { ok = true, taskId });
 });
 
-app.MapPost("/scheduler/config", (HttpRequest req) =>
+// Scheduler config - GET returns current config, POST updates
+app.MapGet("/scheduler/config", () =>
 {
-    using var r = new StreamReader(req.Body);
-    var body = r.ReadToEnd();
-    var request = JsonSerializer.Deserialize<SchedulerConfigRequest>(body);
-    if (request == null)
-        return Results.BadRequest("Invalid config");
+    var runnerConfig = taskRunner.GetConfig();
+    return Results.Json(new
+    {
+        runnerIntervalMs = runnerConfig.RunnerIntervalMs,
+        watchdogSeconds = runnerConfig.WatchdogSeconds,
+        maxTasksPerTick = runnerConfig.MaxTasksPerTick,
+        tickBudgetMs = runnerConfig.TickBudgetMs,
+        schedulerStats = smartScheduler.GetStats()
+    });
+});
+
+app.MapPost("/scheduler/config", async (HttpRequest req) =>
+{
+    try
+    {
+        using var r = new StreamReader(req.Body);
+        var body = await r.ReadToEndAsync();
+        
+        if (string.IsNullOrWhiteSpace(body) || body == "{}")
+        {
+            return Results.Json(new
+            {
+                ok = true,
+                message = "No changes applied",
+                config = taskRunner.GetConfig()
+            });
+        }
+        
+        var request = JsonSerializer.Deserialize<RunnerConfig>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (request == null)
+        {
+            return Results.BadRequest(new { error = "Invalid JSON format" });
+        }
+        
+        // Validate inputs
+        var errors = new List<string>();
+        if (request.RunnerIntervalMs.HasValue && request.RunnerIntervalMs.Value < 100)
+            errors.Add("runnerIntervalMs must be >= 100");
+        if (request.WatchdogSeconds.HasValue && request.WatchdogSeconds.Value < 30)
+            errors.Add("watchdogSeconds must be >= 30");
+        if (request.MaxTasksPerTick.HasValue && request.MaxTasksPerTick.Value < 1)
+            errors.Add("maxTasksPerTick must be >= 1");
+        if (request.TickBudgetMs.HasValue && request.TickBudgetMs.Value < 100)
+            errors.Add("tickBudgetMs must be >= 100");
+        
+        if (errors.Any())
+        {
+            return Results.BadRequest(new { error = "Validation failed", details = errors });
+        }
+        
+        taskRunner.Configure(request);
+        
+        return Results.Json(new { ok = true, config = taskRunner.GetConfig() });
+    }
+    catch (JsonException ex)
+    {
+        return Results.BadRequest(new { error = "Invalid JSON", details = ex.Message });
+    }
+    catch (Exception ex)
+    {
+        ArchLogger.LogError($"[API] /scheduler/config error: {ex.Message}");
+        return Results.BadRequest(new { error = "Configuration error", details = ex.Message });
+    }
+});
+
+// Debug endpoints
+app.MapGet("/task/{id}/trace", (string id) =>
+{
+    var trace = taskRunner.GetTaskTrace(id);
+    if (trace == null)
+        return Results.NotFound(new { error = "Task not found" });
+    return Results.Json(trace);
+});
+
+app.MapGet("/tasks/running", () =>
+{
+    var runningTasks = taskRunner.GetRunningTasks();
+    return Results.Json(new
+    {
+        count = runningTasks.Count,
+        tasks = runningTasks,
+        runnerStats = taskRunner.GetStats()
+    });
+});
+
+app.MapGet("/health/deep", async () =>
+{
+    var runnerStats = taskRunner.GetStats();
+    var runningTasks = taskRunner.GetRunningTasks();
     
-    smartScheduler.ConfigureLimits(
-        request.MaxBrowserConcurrency,
-        request.MaxCpuPercent,
-        request.MaxMemoryMB,
-        request.WatchdogTimeoutSeconds);
+    // Check Net health
+    bool netHealthy = false;
+    try
+    {
+        var netClient = httpClientFactory.CreateClient();
+        netClient.Timeout = TimeSpan.FromSeconds(5);
+        var netResponse = await netClient.GetAsync("http://localhost:5052/health");
+        netHealthy = netResponse.IsSuccessStatusCode;
+    }
+    catch { }
     
-    return Results.Json(new { ok = true, stats = smartScheduler.GetStats() });
+    // Get monitor ticks
+    int? monitorTicks = null;
+    try
+    {
+        var monitorClient = httpClientFactory.CreateClient();
+        monitorClient.Timeout = TimeSpan.FromSeconds(2);
+        var ticksResponse = await monitorClient.GetStringAsync("http://localhost:5051/monitor/ticks");
+        if (int.TryParse(ticksResponse.Trim(), out var ticks))
+            monitorTicks = ticks;
+    }
+    catch { }
+    
+    return Results.Json(new
+    {
+        status = "ok",
+        runner = new
+        {
+            running = runnerStats.Running,
+            lastHeartbeat = runnerStats.LastHeartbeat,
+            heartbeatAgeSeconds = (DateTime.UtcNow - runnerStats.LastHeartbeat).TotalSeconds,
+            watchdogEnabled = runnerStats.WatchdogEnabled,
+            totalTicksProcessed = runnerStats.TotalTicksProcessed,
+            totalStepsExecuted = runnerStats.TotalStepsExecuted
+        },
+        tasks = new
+        {
+            runningCount = runningTasks.Count,
+            oldestAgeSeconds = runningTasks.Any() ? runningTasks.Max(t => t.AgeSeconds) : 0
+        },
+        net = new
+        {
+            healthy = netHealthy
+        },
+        monitor = new
+        {
+            ticks = monitorTicks
+        },
+        config = runnerStats.Config
+    });
 });
 
 app.MapGet("/pairing-data", () =>
