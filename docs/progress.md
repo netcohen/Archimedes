@@ -1357,3 +1357,64 @@ powershell -ExecutionPolicy Bypass -File .\scripts\phase14-ready-gate.ps1 -SoakH
 
 - Runs for 8 hours by default
 - Fail-fast: if any RUNNING task shows no progress for >15 minutes, dumps diagnostics (`/health/deep`, `/tasks/running`, `/task/{id}/trace`) and exits non-zero
+
+---
+
+## Phase 15 – Self-Update Framework + Storage Manager ✅
+
+### A) Self-Update Framework
+
+**SandboxRunner** – isolated sandbox for self-improvement:
+- Creates sandbox workspace (configurable root)
+- Copies repo into sandbox (excludes .git, node_modules, bin, obj, dist, docs, logs, android)
+- Builds Core + Net in sandbox
+- Runs phase14-ready-gate.ps1 (with optional soak)
+- Produces versioned candidate manifest (hashes, commit, test results)
+- Audit logs (redacted, no secrets)
+- Sandbox uses ARCHIMEDES_DATA_PATH and ARCHIMEDES_PORT – never touches production DB/credentials
+
+**PromotionManager** – promotion and rollback:
+- Installs candidate side-by-side (versioned directory)
+- Canary support (canaryPercent)
+- Tracks current/previous version for rollback
+- Emits audit events for promote/rollback
+
+**Endpoints** (no Swagger):
+- `GET /selfupdate/status` – current/canary version, releases root
+- `POST /selfupdate/sandbox-run` – body: `{ commit?, soakHours?, dryRun? }`
+- `POST /selfupdate/promote` – body: `{ candidateId, sandboxPath, canaryPercent? }`
+- `POST /selfupdate/rollback`
+- `GET /selfupdate/audit?skip=0&take=50` – paged, redacted
+
+### B) Storage Manager
+
+- Tiered paths: internal (critical), external (artifacts/logs/models) – configurable via env
+- Retention: logs retention days, artifacts max GB, temp cleanup
+- `GET /storage/health` – free space, largest dirs, policy actions, quota status
+- `POST /storage/cleanup` – run retention/cleanup
+- TaskRunner consults `CanAcceptLoad()` – defers when storage limit reached
+
+Config env vars: `ARCHIMEDES_STORAGE_INTERNAL`, `ARCHIMEDES_STORAGE_EXTERNAL`, `ARCHIMEDES_LOGS_RETENTION_DAYS`, `ARCHIMEDES_ARTIFACTS_MAX_GB`, `ARCHIMEDES_MIN_FREE_MB`
+
+### C) Phase 15 Gate
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\phase15-ready-gate.ps1
+```
+
+With 8-hour Phase 14 soak:
+```powershell
+.\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8
+```
+
+**Required steps (gate FAILS if any fail):**
+1. check-no-secrets.ps1
+2. phase14-ready-gate (SoakHours=0 unless -IncludePhase14Soak)
+3. phase15-storage.ps1
+4. phase15-selfupdate.ps1
+
+### Scripts
+
+- `scripts/phase15-storage.ps1` – storage health, cleanup, report structure
+- `scripts/phase15-selfupdate.ps1` – dry-run sandbox, audit verification, no production access
+- `scripts/phase15-ready-gate.ps1` – orchestrates all Phase 15 checks
