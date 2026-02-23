@@ -1418,3 +1418,19 @@ With 8-hour Phase 14 soak:
 - `scripts/phase15-storage.ps1` – storage health, cleanup, report structure
 - `scripts/phase15-selfupdate.ps1` – dry-run sandbox, audit verification, no production access
 - `scripts/phase15-ready-gate.ps1` – orchestrates all Phase 15 checks
+
+### Phase 15 HOTFIX (gate & test hardening)
+
+**What changed:**
+- **Gate preflight:** Verifies Core and Net are reachable (GET /health) before running steps; supports `ARCHIMEDES_CORE_URL` and `ARCHIMEDES_NET_URL` env overrides; auto-resolves repo root from `$PSScriptRoot`
+- **Gate defaults:** `SoakHours=0` for fast runs; with `-IncludePhase14Soak` and no `-SoakHours`, defaults to 8
+- **Gate logging:** Output written to `logs/gates/phase15-gate-<timestamp>.log` plus console
+- **Storage tests:** Stronger health validation (required fields, types, roots exist or "not configured"); cleanup-effectiveness test (creates old temp file, runs cleanup, verifies); negative test for non-2xx / malformed JSON
+- **Self-update tests:** Status/audit field validation; audit paging (skip/take); dry-run isolation (sandboxPath not under production or repo root); audit redaction (no JWT/PEM/password); rollback accepts only 200/202/409/400; promote returns 400 when missing candidateId/sandboxPath
+- **Output:** All printed lines prefixed clearly (INFO/FAIL/PASS); no documentation lines that could be pasted as commands
+
+**How to run:**
+- Quick (SoakHours=0): `.\scripts\phase15-ready-gate.ps1 -SoakHours 0`
+- Full (8h Phase 14 soak): `.\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8`
+
+**Logs:** `logs/gates/phase15-gate-<timestamp>.log`
