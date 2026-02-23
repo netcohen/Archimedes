@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 $coreUrl = "http://localhost:5051"
-$repoRoot = "C:\Users\netanel\Desktop\Archimedes"
+$repoRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { Split-Path -Parent (Get-Location) }
 
 Write-Host "=== Phase 14 Security Test Suite ===" -ForegroundColor Cyan
 Write-Host "Testing: No secrets, log redaction, encrypted storage, policy enforcement" -ForegroundColor Gray

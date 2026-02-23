@@ -1309,3 +1309,51 @@ curl.exe -s http://localhost:5051/task/$taskId
 | /task/{id}/trace returns diagnostics | ✅ |
 
 **Result:** PASS – Execution engine fully operational, tasks complete end-to-end.
+
+---
+
+## Phase 14 Gate (Readiness for Phase 15)
+
+A single orchestrator runs all validation scripts in strict order. Use this before moving to Phase 15 after an 8-hour soak.
+
+### How to run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\phase14-ready-gate.ps1
+```
+
+Override soak duration (default 8 hours):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\phase14-ready-gate.ps1 -SoakHours 4
+```
+
+### Prerequisites
+
+- Core running on http://localhost:5051
+- Net running on http://localhost:5052
+
+### What it validates
+
+**Required steps (gate FAILS if any fail):**
+1. `check-no-secrets.ps1` – No secrets in repo
+2. `phase14-security.ps1` – Security regression (encryption, policy, redaction)
+3. `phase14-e2e.ps1` – Phase 14 E2E regression suite
+4. `phase14-chaos.ps1` – Chaos tests (persistence, dedup, resilience)
+5. `e2e.ps1` – Quick E2E suite (21 tests)
+6. `run-soak.ps1 -DurationHours 8` – 8-hour soak test
+
+**Optional (informational, does not fail gate):**
+- `llm-smoke.ps1` – If Ollama unavailable, prints WARNING and continues
+
+### Behavior
+
+- Stops immediately on first failure
+- Prints PASS/FAIL per step with timestamps
+- Propagates failing script exit code
+- Exit 0 only if all required steps pass
+
+### Soak test
+
+- Runs for 8 hours by default
+- Fail-fast: if any RUNNING task shows no progress for >15 minutes, dumps diagnostics (`/health/deep`, `/tasks/running`, `/task/{id}/trace`) and exits non-zero
