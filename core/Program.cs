@@ -34,8 +34,32 @@ var planner = new Planner(llmAdapter, policyEngine);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
 
-var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient());
+var storageConfig = new StorageConfig
+{
+    RootInternal = Environment.GetEnvironmentVariable("ARCHIMEDES_STORAGE_INTERNAL")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Archimedes"),
+    RootExternal = Environment.GetEnvironmentVariable("ARCHIMEDES_STORAGE_EXTERNAL"),
+    LogsRetentionDays = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_LOGS_RETENTION_DAYS"), out var lrd) ? lrd : 7,
+    ArtifactsMaxGB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_ARTIFACTS_MAX_GB"), out var amg) ? amg : 10,
+    MinFreeSpaceMB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_MIN_FREE_MB"), out var mfm) ? mfm : 500
+};
+var storageManager = new StorageManager(storageConfig);
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager);
 taskRunner.Start();
+
+var selfUpdateAudit = new SelfUpdateAudit();
+var sandboxRoot = Path.Combine(storageManager.RootInternal, "sandbox");
+var releasesRoot = Path.Combine(storageManager.RootInternal, "releases");
+var repoRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_REPO_ROOT");
+if (string.IsNullOrEmpty(repoRoot))
+{
+    var d = new DirectoryInfo(AppContext.BaseDirectory);
+    while (d != null && !File.Exists(Path.Combine(d.FullName, "scripts", "phase14-ready-gate.ps1")))
+        d = d.Parent;
+    repoRoot = d?.FullName ?? Path.GetDirectoryName(AppContext.BaseDirectory) ?? AppContext.BaseDirectory;
+}
+var sandboxRunner = new SandboxRunner(sandboxRoot, repoRoot, selfUpdateAudit);
+var promotionManager = new PromotionManager(releasesRoot, selfUpdateAudit);
 
 SavedState? LoadStateFromDisk()
 {
@@ -633,6 +657,90 @@ app.MapGet("/health/deep", async () =>
     });
 });
 
+app.MapGet("/storage/health", () =>
+{
+    var report = storageManager.GetHealthReport();
+    return Results.Json(report);
+});
+
+app.MapPost("/storage/cleanup", () =>
+{
+    var result = storageManager.RunCleanup();
+    return Results.Json(result);
+});
+
+app.MapGet("/selfupdate/status", () =>
+{
+    var status = promotionManager.GetStatus();
+    return Results.Json(new
+    {
+        currentVersion = status.CurrentVersion,
+        canaryVersion = status.CanaryVersion,
+        releasesRoot = status.ReleasesRoot,
+        recentMetricsCount = status.RecentMetrics.Count
+    });
+});
+
+app.MapPost("/selfupdate/sandbox-run", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var commit = "HEAD";
+    var soakHours = 0;
+    var dryRun = false;
+    if (!string.IsNullOrWhiteSpace(body))
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("commit", out var c)) commit = c.GetString() ?? "HEAD";
+            if (doc.RootElement.TryGetProperty("soakHours", out var s)) soakHours = s.GetInt32();
+            if (doc.RootElement.TryGetProperty("dryRun", out var d)) dryRun = d.GetBoolean();
+        }
+        catch { }
+    }
+    var result = await Task.Run(() => sandboxRunner.Run(commit, soakHours, dryRun));
+    return Results.Json(result);
+});
+
+app.MapPost("/selfupdate/promote", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    string? candidateId = null;
+    string? sandboxPath = null;
+    double? canaryPercent = null;
+    if (!string.IsNullOrWhiteSpace(body))
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("candidateId", out var c)) candidateId = c.GetString();
+            if (doc.RootElement.TryGetProperty("sandboxPath", out var s)) sandboxPath = s.GetString();
+            if (doc.RootElement.TryGetProperty("canaryPercent", out var p)) canaryPercent = p.GetDouble();
+        }
+        catch { }
+    }
+    if (string.IsNullOrEmpty(candidateId) || string.IsNullOrEmpty(sandboxPath))
+        return Results.BadRequest("candidateId and sandboxPath required");
+    var ok = promotionManager.Promote(candidateId, sandboxPath, canaryPercent);
+    return Results.Json(new { ok });
+});
+
+app.MapPost("/selfupdate/rollback", () =>
+{
+    var ok = promotionManager.Rollback();
+    return Results.Json(new { ok });
+});
+
+app.MapGet("/selfupdate/audit", (int? skip, int? take) =>
+{
+    var skipVal = skip ?? 0;
+    var takeVal = take ?? 50;
+    var events = selfUpdateAudit.GetEvents(skipVal, takeVal);
+    return Results.Json(new { events, total = events.Count });
+});
+
 app.MapGet("/pairing-data", () =>
 {
     var sessionId = Guid.NewGuid().ToString("N");
@@ -1032,7 +1140,7 @@ app.MapPost("/store/test", async (HttpRequest req) =>
     });
 });
 
-var port = 5051;
+var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
 app.Run();

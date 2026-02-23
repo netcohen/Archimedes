@@ -36,11 +36,14 @@ public class TaskRunner
     private readonly ConcurrentQueue<TraceLogEntry> _traceLogs = new();
     private const int MaxTraceLogs = 500;
     
-    public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient)
+    private readonly StorageManager? _storageManager;
+
+    public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient, StorageManager? storageManager = null)
     {
         _taskService = taskService;
         _planner = planner;
         _httpClient = httpClient;
+        _storageManager = storageManager;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
     }
     
@@ -178,6 +181,13 @@ public class TaskRunner
                 _lastHeartbeat = DateTime.UtcNow;
                 var tickStart = DateTime.UtcNow;
                 var tasksProcessed = 0;
+                
+                if (_storageManager != null && !_storageManager.CanAcceptLoad())
+                {
+                    AddTrace("WARN", "Storage load limit reached, deferring background runs");
+                    await Task.Delay(_runnerIntervalMs, ct);
+                    continue;
+                }
                 
                 // Get RUNNING tasks that need processing
                 var runningTasks = _taskService.GetTasks(TaskState.RUNNING)
