@@ -13,8 +13,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$coreUrl = "http://localhost:5051"
-$netUrl = "http://localhost:5052"
+$coreUrl = if ($env:ARCHIMEDES_CORE_URL) { $env:ARCHIMEDES_CORE_URL } else { "http://localhost:5051" }
+$netUrl = if ($env:ARCHIMEDES_NET_URL) { $env:ARCHIMEDES_NET_URL } else { "http://localhost:5052" }
 
 # Create log directory
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

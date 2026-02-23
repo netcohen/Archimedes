@@ -2,7 +2,7 @@
 # Chaos testing for Phase 14 - crash recovery, persistence, resilience
 
 $ErrorActionPreference = "Stop"
-$coreUrl = "http://localhost:5051"
+$coreUrl = if ($env:ARCHIMEDES_CORE_URL) { $env:ARCHIMEDES_CORE_URL } else { "http://localhost:5051" }
 
 Write-Host "=== Phase 14 Chaos Test Suite ===" -ForegroundColor Cyan
 Write-Host "Testing: Crash recovery, persistence, concurrent requests" -ForegroundColor Gray

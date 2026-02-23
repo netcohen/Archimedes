@@ -2,7 +2,7 @@
 # Security regression tests for Phase 14
 
 $ErrorActionPreference = "Stop"
-$coreUrl = "http://localhost:5051"
+$coreUrl = if ($env:ARCHIMEDES_CORE_URL) { $env:ARCHIMEDES_CORE_URL } else { "http://localhost:5051" }
 $repoRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { Split-Path -Parent (Get-Location) }
 
 Write-Host "=== Phase 14 Security Test Suite ===" -ForegroundColor Cyan

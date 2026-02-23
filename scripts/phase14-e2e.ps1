@@ -2,8 +2,8 @@
 # End-to-end regression tests for Phase 14
 
 $ErrorActionPreference = "Stop"
-$coreUrl = "http://localhost:5051"
-$netUrl = "http://localhost:5052"
+$coreUrl = if ($env:ARCHIMEDES_CORE_URL) { $env:ARCHIMEDES_CORE_URL } else { "http://localhost:5051" }
+$netUrl = if ($env:ARCHIMEDES_NET_URL) { $env:ARCHIMEDES_NET_URL } else { "http://localhost:5052" }
 
 Write-Host "=== Phase 14 E2E Regression Suite ===" -ForegroundColor Cyan
 Write-Host "Testing: Task lifecycle, Planner, Policy, Scheduler, LLM, Approvals" -ForegroundColor Gray

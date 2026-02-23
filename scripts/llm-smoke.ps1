@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== LLM Smoke Test ===" -ForegroundColor Cyan
 
-$coreUrl = "http://localhost:5051"
+$coreUrl = if ($env:ARCHIMEDES_CORE_URL) { $env:ARCHIMEDES_CORE_URL } else { "http://localhost:5051" }
 
 # Test health
 Write-Host "`nChecking LLM health..." -ForegroundColor Yellow
