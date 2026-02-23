@@ -12,10 +12,12 @@ public class EncryptedStore : IDisposable
 
     public EncryptedStore(string? basePath = null)
     {
-        var dir = basePath ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Archimedes"
-        );
+        var dir = basePath
+            ?? Environment.GetEnvironmentVariable("ARCHIMEDES_DATA_PATH")
+            ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Archimedes"
+            );
         Directory.CreateDirectory(dir);
         
         _dbPath = Path.Combine(dir, "archimedes.db");

@@ -4,7 +4,7 @@ import { safeLogPayload, safeLog } from "./redactor";
 import { handleTestsite } from "./testsite";
 import { runBrowserSteps, getRunStatus, getAllRuns, isBrowserAvailable, BrowserStep } from "./browser";
 
-const PORT = 5052;
+const PORT = parseInt(process.env.PORT || "5052", 10);
 const CORE_URL = "http://localhost:5051";
 
 const envelopeQueue: string[] = [];
