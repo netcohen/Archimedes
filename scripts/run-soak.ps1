@@ -7,6 +7,7 @@ param(
     [int]$DurationHours = 12,
     [int]$TaskIntervalMinutes = 2,
     [int]$HealthCheckMinutes = 5,
+    [int]$StuckTaskDeadlineMinutes = 15,
     [switch]$SimulateFailures = $false,
     [string]$LogDir = "$PSScriptRoot/../logs/soak"
 )
@@ -53,6 +54,31 @@ function Check-Health {
             Ok = $false
             Error = $_.Exception.Message
         }
+    }
+}
+
+function Dump-Diagnostics {
+    param([string]$Reason)
+    Log "=== DIAGNOSTICS: $Reason ===" "ERROR"
+    try {
+        $deep = Invoke-RestMethod -Uri "$coreUrl/health/deep" -TimeoutSec 10
+        Log "/health/deep: $($deep | ConvertTo-Json -Depth 5 -Compress)" "ERROR"
+    } catch {
+        Log "/health/deep failed: $($_.Exception.Message)" "ERROR"
+    }
+    try {
+        $running = Invoke-RestMethod -Uri "$coreUrl/tasks/running" -TimeoutSec 10
+        Log "/tasks/running: $($running | ConvertTo-Json -Depth 5 -Compress)" "ERROR"
+        foreach ($t in $running.tasks) {
+            try {
+                $trace = Invoke-RestMethod -Uri "$coreUrl/task/$($t.taskId)/trace" -TimeoutSec 5
+                Log "/task/$($t.taskId)/trace: $($trace | ConvertTo-Json -Depth 3 -Compress)" "ERROR"
+            } catch {
+                Log "/task/$($t.taskId)/trace failed: $($_.Exception.Message)" "ERROR"
+            }
+        }
+    } catch {
+        Log "/tasks/running failed: $($_.Exception.Message)" "ERROR"
     }
 }
 
@@ -138,7 +164,21 @@ while ((Get-Date) -lt $endTime) {
             
             Log "Health OK: runner=$($health.RunnerRunning), running=$($health.RunningTasks), ticks=$($health.TotalTicks), steps=$($health.TotalSteps)"
             
-            # Check for stuck tasks (running > 10)
+            # Fail fast: check for stuck RUNNING tasks
+            $stuckDeadlineSeconds = $StuckTaskDeadlineMinutes * 60
+            try {
+                $runningData = Invoke-RestMethod -Uri "$coreUrl/tasks/running" -TimeoutSec 10
+                $stuckTasks = @($runningData.tasks | Where-Object { $_.lastUpdateSeconds -gt $stuckDeadlineSeconds })
+                if ($stuckTasks.Count -gt 0) {
+                    Log "FAIL: $($stuckTasks.Count) stuck task(s) (no progress for >$StuckTaskDeadlineMinutes min)" "ERROR"
+                    Dump-Diagnostics -Reason "Stuck RUNNING tasks: $($stuckTasks.taskId -join ', ')"
+                    exit 1
+                }
+            } catch {
+                Log "WARNING: Could not check for stuck tasks: $($_.Exception.Message)" "WARN"
+            }
+            
+            # Check for many running tasks (possible backlog)
             if ($health.RunningTasks -gt 10) {
                 Log "WARNING: $($health.RunningTasks) tasks running - possible stuck tasks" "WARN"
             }
