@@ -123,22 +123,42 @@ try {
     $failed++
 }
 
-# Test 5: Invalid input handling
+# Test 5: Invalid input handling - expect 400/422; 500 -> FAIL with diagnostics
 Write-Host "`n[5] Invalid Input Handling Test" -ForegroundColor Yellow
 try {
-    # Completely invalid JSON
     $badBody = 'not valid json at all'
     try {
         $result = Invoke-RestMethod -Uri "$coreUrl/task" -Method Post -Body $badBody -ContentType "application/json"
         Write-Host "  FAIL: Should have rejected invalid JSON" -ForegroundColor Red
         $failed++
     } catch {
-        if ($_.Exception.Response.StatusCode -eq 400 -or $_.Exception.Message -match "400" -or $_.Exception.Message -match "Invalid") {
-            Write-Host "  PASS: Correctly rejected invalid JSON (400)" -ForegroundColor Green
+        $status = 0
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        if ($status -eq 400 -or $status -eq 422 -or $_.Exception.Message -match "400|422|Invalid") {
+            Write-Host "  PASS: Correctly rejected invalid JSON (400/422)" -ForegroundColor Green
             $passed++
+        } elseif ($status -eq 500 -or $_.Exception.Message -match "500") {
+            Write-Host "  FAIL: Server returned 500 for invalid input (expected 400/422)" -ForegroundColor Red
+            Write-Host "  Dumping diagnostics..." -ForegroundColor Yellow
+            try {
+                $deep = Invoke-RestMethod -Uri "$coreUrl/health/deep" -Method Get -TimeoutSec 5
+                Write-Host "    /health/deep: $($deep | ConvertTo-Json -Depth 3 -Compress)" -ForegroundColor Gray
+            } catch { Write-Host "    /health/deep: $($_.Exception.Message)" -ForegroundColor Gray }
+            try {
+                $running = Invoke-RestMethod -Uri "$coreUrl/tasks/running" -Method Get -TimeoutSec 5
+                Write-Host "    /tasks/running: count=$($running.count)" -ForegroundColor Gray
+                foreach ($t in $running.tasks) {
+                    try {
+                        $trace = Invoke-RestMethod -Uri "$coreUrl/task/$($t.taskId)/trace" -Method Get -TimeoutSec 5
+                        Write-Host "    /task/$($t.taskId)/trace: $($trace | ConvertTo-Json -Depth 2 -Compress)" -ForegroundColor Gray
+                    } catch { Write-Host "    /task/$($t.taskId)/trace: $($_.Exception.Message)" -ForegroundColor Gray }
+                }
+            } catch { Write-Host "    /tasks/running: $($_.Exception.Message)" -ForegroundColor Gray }
+            $failed++
+            exit 1
         } else {
-            Write-Host "  WARN: Unexpected error handling: $($_.Exception.Message)" -ForegroundColor Yellow
-            $passed++  # Still counts as handled (didn't crash)
+            Write-Host "  FAIL: Unexpected error handling (expected 400/422): $($_.Exception.Message)" -ForegroundColor Red
+            $failed++
         }
     }
 } catch {
