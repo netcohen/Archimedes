@@ -1443,3 +1443,11 @@ With 8-hour Phase 14 soak:
 - **Self-update (phase15-selfupdate.ps1):** Expanded redaction patterns (Authorization: Bearer, refresh_token, access_token, api_key, private_key_id, BEGIN PRIVATE KEY, JWT, password=); on detection, dump offending snippet (80 chars, redacted) and FAIL
 - **Storage (phase15-storage.ps1):** "not configured" vs "configured but broken" – PASS only if `ARCHIMEDES_STORAGE_NOT_CONFIGURED_EXPECTED=true` when roots not configured; configured paths must exist and be writable; resilient cleanup (tries temp then logs)
 - **Gates (phase14/15-ready-gate.ps1):** How-to-run lines prefixed with `#`; "Commands to run next:" section at end with valid commands only
+
+### Phase 15 HOTFIX v3 (self-update sandbox-run + promote)
+
+**What changed:**
+- **Core sandbox-run response:** Always returns `runId`, `sandboxPath`, `buildLogPath`, `success`, `error`; `sandboxPath` at top level even on build failure
+- **Core sandbox:** Create sandbox dir first; use `dotnet publish -o <sandbox>/core/bin/...` (never repo); write `build.log`; include last ~50 lines (redacted) in `errorDetails` on failure
+- **Core promote:** Return 404 when candidate build path does not exist
+- **phase15-selfupdate.ps1:** Prefer `$result.sandboxPath` (top-level); on dry-run failure with sandboxPath present, WARN and continue tests 4–8; promote validation 400 (missing fields) and 404 (bogus candidate)
