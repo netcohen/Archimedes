@@ -48,7 +48,10 @@ var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateCl
 taskRunner.Start();
 
 var selfUpdateAudit = new SelfUpdateAudit();
-var sandboxRoot = Path.Combine(storageManager.RootInternal, "sandbox");
+var sandboxRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_SANDBOX_ROOT");
+if (string.IsNullOrWhiteSpace(sandboxRoot))
+    sandboxRoot = Path.Combine(Path.GetTempPath(), "ArchimedesSandbox");
+sandboxRoot = Path.GetFullPath(sandboxRoot);
 var releasesRoot = Path.Combine(storageManager.RootInternal, "releases");
 var repoRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_REPO_ROOT");
 if (string.IsNullOrEmpty(repoRoot))
@@ -677,6 +680,7 @@ app.MapGet("/selfupdate/status", () =>
         currentVersion = status.CurrentVersion,
         canaryVersion = status.CanaryVersion,
         releasesRoot = status.ReleasesRoot,
+        sandboxRoot = sandboxRoot,
         recentMetricsCount = status.RecentMetrics.Count
     });
 });

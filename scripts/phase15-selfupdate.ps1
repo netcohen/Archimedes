@@ -18,6 +18,33 @@ $script:auditEventsAfter = @()
 
 $productionDataPath = [Environment]::GetFolderPath("LocalApplicationData") + "\Archimedes"
 
+function Invoke-HttpSafe {
+    param([string]$Uri, [string]$Method = "Get", [string]$Body = $null)
+    try {
+        $p = @{ Uri = $Uri; Method = $Method; UseBasicParsing = $true; TimeoutSec = 5 }
+        if ($Body) { $p.Body = $Body; $p.ContentType = "application/json" }
+        $r = Invoke-WebRequest @p -ErrorAction Stop
+        return @{ StatusCode = [int]$r.StatusCode; Content = $r.Content }
+    } catch {
+        $status = 0
+        $content = ""
+        $resp = $_.Exception.Response
+        if ($resp) {
+            try { $status = [int]$resp.StatusCode } catch { }
+            try {
+                $stream = $resp.GetResponseStream()
+                if ($stream) {
+                    $sr = New-Object System.IO.StreamReader($stream)
+                    $content = $sr.ReadToEnd()
+                    $sr.Dispose()
+                }
+            } catch { }
+        }
+        if ($content -eq "" -and $_.ErrorDetails.Message) { $content = $_.ErrorDetails.Message }
+        return @{ StatusCode = $status; Content = $content }
+    }
+}
+
 function Fail-With {
     param([string]$Msg, [string]$Url = "", [int]$Status = 0, [string]$Snippet = "")
     Write-Host "  FAIL: $Msg" -ForegroundColor Red
@@ -181,46 +208,25 @@ try {
     }
 }
 
-# Test 7: Promote validation - missing fields -> 400
+# Test 7: Promote validation - missing fields -> 400 (use non-throwing HTTP helper)
 Write-Host "`n[7] POST /selfupdate/promote (missing fields -> 400)" -ForegroundColor Yellow
-try {
-    $resp = Invoke-WebRequest -Uri "$coreUrl/selfupdate/promote" -Method Post -Body '{}' -ContentType "application/json" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($resp.StatusCode -eq 400 -and $resp.Content -match "candidateId|sandboxPath|required") {
-        Write-Host "  PASS: Promote returns 400 with validation message" -ForegroundColor Green
-        $passed++
-    } else {
-        Fail-With "Expected 400 for missing candidateId/sandboxPath" "$coreUrl/selfupdate/promote" $resp.StatusCode $resp.Content
-    }
-} catch {
-    $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-    $body = if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { "" }
-    if ($status -eq 400 -and $body -match "candidateId|sandboxPath|required") {
-        Write-Host "  PASS: Promote returns 400 with validation message" -ForegroundColor Green
-        $passed++
-    } else {
-        Fail-With "Promote validation check failed" "$coreUrl/selfupdate/promote" $status $body
-    }
+$r7 = Invoke-HttpSafe -Uri "$coreUrl/selfupdate/promote" -Method Post -Body '{}'
+if ($r7.StatusCode -eq 400 -and $r7.Content -match "candidateId|sandboxPath|required") {
+    Write-Host "  PASS: Promote returns 400 with validation message" -ForegroundColor Green
+    $passed++
+} else {
+    Fail-With "Expected 400 for missing candidateId/sandboxPath" "$coreUrl/selfupdate/promote" $r7.StatusCode $r7.Content
 }
 
-# Test 8: Promote bogus candidate -> 404/409
+# Test 8: Promote bogus candidate -> 404 (use non-throwing HTTP helper)
 Write-Host "`n[8] POST /selfupdate/promote (bogus candidate -> 404)" -ForegroundColor Yellow
-try {
-    $bogusBody = '{"candidateId":"bogus-nonexistent","sandboxPath":"C:\\nonexistent\\path\\sb-fake"}'
-    $resp = Invoke-WebRequest -Uri "$coreUrl/selfupdate/promote" -Method Post -Body $bogusBody -ContentType "application/json" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($resp.StatusCode -eq 404 -or $resp.StatusCode -eq 409) {
-        Write-Host "  PASS: Promote returns $($resp.StatusCode) for bogus candidate" -ForegroundColor Green
-        $passed++
-    } else {
-        Fail-With "Expected 404/409 for bogus candidate, got $($resp.StatusCode)" "$coreUrl/selfupdate/promote" $resp.StatusCode $resp.Content
-    }
-} catch {
-    $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-    if ($status -eq 404 -or $status -eq 409) {
-        Write-Host "  PASS: Promote returns $status for bogus candidate" -ForegroundColor Green
-        $passed++
-    } else {
-        Fail-With "Expected 404/409 for bogus candidate" "$coreUrl/selfupdate/promote" $status ($_.ErrorDetails.Message)
-    }
+$bogusBody = '{"candidateId":"bogus-nonexistent","sandboxPath":"C:\\nonexistent\\path\\sb-fake"}'
+$r8 = Invoke-HttpSafe -Uri "$coreUrl/selfupdate/promote" -Method Post -Body $bogusBody
+if ($r8.StatusCode -eq 404 -or $r8.StatusCode -eq 409) {
+    Write-Host "  PASS: Promote returns $($r8.StatusCode) for bogus candidate" -ForegroundColor Green
+    $passed++
+} else {
+    Fail-With "Expected 404/409 for bogus candidate, got $($r8.StatusCode)" "$coreUrl/selfupdate/promote" $r8.StatusCode $r8.Content
 }
 
 # Summary

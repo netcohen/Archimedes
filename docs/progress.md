@@ -1451,3 +1451,7 @@ With 8-hour Phase 14 soak:
 - **Core sandbox:** Create sandbox dir first; use `dotnet publish -o <sandbox>/core/bin/...` (never repo); write `build.log`; include last ~50 lines (redacted) in `errorDetails` on failure
 - **Core promote:** Return 404 when candidate build path does not exist
 - **phase15-selfupdate.ps1:** Prefer `$result.sandboxPath` (top-level); on dry-run failure with sandboxPath present, WARN and continue tests 4–8; promote validation 400 (missing fields) and 404 (bogus candidate)
+
+**Phase 15 HOTFIX v3.1 (sandbox isolation + promote test):**
+- **Core:** `ARCHIMEDES_SANDBOX_ROOT` env var; default sandbox base = `%TEMP%\ArchimedesSandbox` (never under `%LOCALAPPDATA%\Archimedes`); `/selfupdate/status` exposes `sandboxRoot`
+- **Script:** `Invoke-HttpSafe` helper (no throw); tests 7–8 use it so 400/404 are PASS without exception handling
