@@ -116,10 +116,18 @@ Log ""
 $startTime = Get-Date
 $endTime = $startTime.AddHours($DurationHours)
 
+# Baseline: capture task counts at start (for delta accounting)
+$baseline = @{ created = 0; completed = 0; failed = 0 }
+try {
+    $allTasks = @(Invoke-RestMethod -Uri "$coreUrl/tasks" -Method Get -TimeoutSec 10)
+    $baseline.created = $allTasks.Count
+    $baseline.completed = ($allTasks | Where-Object { $_.state -eq "DONE" }).Count
+    $baseline.failed = ($allTasks | Where-Object { $_.state -eq "FAILED" }).Count
+} catch {
+    Log "Could not capture baseline task counts: $($_.Exception.Message)" "WARN"
+}
+
 $stats = @{
-    TasksCreated = 0
-    TasksCompleted = 0
-    TasksFailed = 0
     HealthChecks = 0
     HealthChecksFailed = 0
     MaxRunningTasks = 0
@@ -137,11 +145,10 @@ while ((Get-Date) -lt $endTime) {
     
     # Create task every N minutes
     if (($now - $lastTaskTime).TotalMinutes -ge $TaskIntervalMinutes) {
-        $type = if ($stats.TasksCreated % 5 -eq 0) { "monitor" } else { "quick" }
+        $type = if ($taskIds.Count % 5 -eq 0) { "monitor" } else { "quick" }
         $result = Create-TestTask -Type $type
         
         if ($result.Success) {
-            $stats.TasksCreated++
             $taskIds += $result.TaskId
             Log "Task created: $($result.TaskId) ($type)" "SUCCESS"
         } else {
@@ -194,19 +201,6 @@ while ((Get-Date) -lt $endTime) {
         }
         
         $lastHealthTime = $now
-        
-        # Check task completions (sample recent tasks)
-        $recentTasks = $taskIds | Select-Object -Last 10
-        foreach ($tid in $recentTasks) {
-            try {
-                $task = Invoke-RestMethod -Uri "$coreUrl/task/$tid" -TimeoutSec 5
-                if ($task.state -eq "DONE") {
-                    $stats.TasksCompleted++
-                } elseif ($task.state -eq "FAILED") {
-                    $stats.TasksFailed++
-                }
-            } catch { }
-        }
     }
     
     # Simulate failure (optional)
@@ -221,32 +215,62 @@ while ((Get-Date) -lt $endTime) {
 # ========== Summary ==========
 $duration = (Get-Date) - $startTime
 
+# Compute delta from our created tasks only (internally consistent)
+$deltaCreated = $taskIds.Count
+$deltaCompleted = 0
+$deltaFailed = 0
+foreach ($tid in $taskIds) {
+    try {
+        $task = Invoke-RestMethod -Uri "$coreUrl/task/$tid" -TimeoutSec 5
+        if ($task.state -eq "DONE") { $deltaCompleted++ }
+        elseif ($task.state -eq "FAILED") { $deltaFailed++ }
+    } catch { }
+}
+
+# Invariants: deltaCompleted + deltaFailed <= deltaCreated; deltaFailed == 0 for PASS
+$deltaStillPending = $deltaCreated - $deltaCompleted - $deltaFailed
+
 Log ""
 Log "=== Soak Test Complete ===" "INFO"
 Log "Duration: $($duration.TotalHours.ToString('F1')) hours"
-Log "Tasks created: $($stats.TasksCreated)"
-Log "Tasks completed: $($stats.TasksCompleted)"
-Log "Tasks failed: $($stats.TasksFailed)"
+Log "Delta (this run): created=$deltaCreated, completed=$deltaCompleted, failed=$deltaFailed, pending=$deltaStillPending"
 Log "Health checks: $($stats.HealthChecks) (failed: $($stats.HealthChecksFailed))"
 Log "Max running tasks: $($stats.MaxRunningTasks)"
 Log "Errors: $($stats.Errors.Count)"
 
-# Write summary JSON
+# Write summary JSON with clear delta/absolute labels
 $summaryData = @{
     StartTime = $startTime.ToString("o")
     EndTime = (Get-Date).ToString("o")
     DurationHours = $duration.TotalHours
-    Stats = $stats
+    Baseline = @{
+        type = "absolute"
+        totalTasks = $baseline.created
+        completedTasks = $baseline.completed
+        failedTasks = $baseline.failed
+    }
+    Delta = @{
+        type = "delta"
+        created = $deltaCreated
+        completed = $deltaCompleted
+        failed = $deltaFailed
+        pending = $deltaStillPending
+    }
+    HealthChecks = $stats.HealthChecks
+    HealthChecksFailed = $stats.HealthChecksFailed
+    MaxRunningTasks = $stats.MaxRunningTasks
+    Errors = $stats.Errors
 } | ConvertTo-Json -Depth 5
 Set-Content -Path $summaryFile -Value $summaryData
 
 Log ""
 Log "Summary written to: $summaryFile"
 
-if ($stats.HealthChecksFailed -eq 0 -and $stats.TasksFailed -le ($stats.TasksCreated * 0.05)) {
+# PASS requires: deltaFailed == 0, and no health check failures
+if ($stats.HealthChecksFailed -eq 0 -and $deltaFailed -eq 0) {
     Log "PASS: Soak test passed" "SUCCESS"
     exit 0
 } else {
-    Log "FAIL: Soak test had issues" "ERROR"
+    Log "FAIL: Soak test had issues (deltaFailed=$deltaFailed, healthChecksFailed=$($stats.HealthChecksFailed))" "ERROR"
     exit 1
 }
