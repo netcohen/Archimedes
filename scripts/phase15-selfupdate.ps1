@@ -110,30 +110,49 @@ if ($script:sandboxPath) {
     Write-Host "  SKIP: No sandbox path from dry-run" -ForegroundColor Yellow
 }
 
-# Test 5: Audit has NEW events after dry-run and is redacted
-Write-Host "`n[5] Audit new events + redaction" -ForegroundColor Yellow
+# Test 5: Audit redaction - no secrets, tokens, JWTs, Authorization, PEM, password
+Write-Host "`n[5] Audit redaction (no secrets)" -ForegroundColor Yellow
+$redactionPatterns = @(
+    @{ name = "JWT-like"; pattern = 'eyJ[A-Za-z0-9_-]{20,}' }
+    @{ name = "PEM private"; pattern = '-----BEGIN\s+PRIVATE\s+KEY-----' }
+    @{ name = "PEM generic"; pattern = '-----BEGIN' }
+    @{ name = "password="; pattern = 'password\s*=' }
+    @{ name = "Authorization Bearer"; pattern = 'Authorization\s*:\s*Bearer' }
+    @{ name = "refresh_token"; pattern = 'refresh_token["\s:=]+[^\s"''},]{10,}' }
+    @{ name = "access_token"; pattern = 'access_token["\s:=]+[^\s"''},]{10,}' }
+    @{ name = "api_key"; pattern = 'api_key["\s:=]+[^\s"''},]{10,}' }
+    @{ name = "private_key_id"; pattern = 'private_key_id["\s:=]+[^\s"''},]{10,}' }
+)
 try {
     $audit = Invoke-RestMethod -Uri "$coreUrl/selfupdate/audit?take=50" -Method Get -TimeoutSec 10
     $script:auditEventsAfter = @($audit.events)
-    $forbidden = @(
-        { param($t) $t -match 'eyJ[A-Za-z0-9_-]{30,}' },
-        { param($t) $t -match '-----BEGIN' },
-        { param($t) $t -match 'password\s*=' }
-    )
-    $hasForbidden = $false
+    $offendingSnippet = ""
+    $offendingPattern = ""
     foreach ($evt in $script:auditEventsAfter) {
         $text = ($evt | ConvertTo-Json -Compress)
-        foreach ($f in $forbidden) {
-            if (& $f $text) { $hasForbidden = $true; break }
+        foreach ($p in $redactionPatterns) {
+            $m = [regex]::Match($text, $p.pattern)
+            if ($m.Success) {
+                $offendingPattern = $p.name
+                $start = [Math]::Max(0, $m.Index)
+                $len = [Math]::Min(80, [Math]::Min($m.Length + 20, $text.Length - $start))
+                $raw = $text.Substring($start, $len)
+                $redacted = $raw -replace 'eyJ[A-Za-z0-9_-]{10,}', 'eyJ***REDACTED***'
+                $redacted = $redacted -replace '-----BEGIN[^Z]*', '***REDACTED***'
+                $redacted = $redacted -replace 'password=[^&\s"'']+', 'password=***'
+                $redacted = $redacted -replace 'Bearer\s+[^\s"''}]+', 'Bearer ***REDACTED***'
+                $offendingSnippet = $redacted
+                break
+            }
         }
+        if ($offendingSnippet) { break }
     }
-    if ($hasForbidden) {
-        Fail-With "Audit contains potential raw secret (JWT/PEM/password)"
-    } elseif ($script:auditEventsAfter.Count -ge $script:auditEventsBefore.Count) {
-        Write-Host "  PASS: Audit has events, no raw secrets" -ForegroundColor Green
-        $passed++
+    if ($offendingSnippet) {
+        Write-Host "  FAIL: Audit contains potential secret (pattern: $offendingPattern)" -ForegroundColor Red
+        Write-Host "    Snippet (redacted): $offendingSnippet" -ForegroundColor Gray
+        $failed++
     } else {
-        Write-Host "  PASS: Audit redaction OK (events may vary)" -ForegroundColor Green
+        Write-Host "  PASS: Audit has no raw secrets (JWT/PEM/password/Authorization/tokens)" -ForegroundColor Green
         $passed++
     }
 } catch {
