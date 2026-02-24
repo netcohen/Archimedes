@@ -77,6 +77,8 @@ Write-Host "  Soak duration: $SoakHours hours" -ForegroundColor Gray
 Write-Host "  Repo root: $repoRoot" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "# To run: .\scripts\phase14-ready-gate.ps1 -SoakHours $SoakHours" -ForegroundColor DarkGray
+Write-Host ""
 
 $gateStart = Get-Date
 
@@ -113,4 +115,9 @@ Write-Host "  GATE PASSED" -ForegroundColor Green
 Write-Host "  All required steps completed" -ForegroundColor Green
 Write-Host "  Duration: $($duration.TotalHours.ToString('F1')) hours" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "Commands to run next:" -ForegroundColor Cyan
+Write-Host "  .\scripts\phase15-ready-gate.ps1 -SoakHours 0" -ForegroundColor White
+Write-Host "  .\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8" -ForegroundColor White
+Write-Host ""
 exit 0

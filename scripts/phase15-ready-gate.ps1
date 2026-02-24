@@ -69,9 +69,9 @@ function Invoke-Step {
     return $false
 }
 
-# HOW TO RUN block (informational only)
-Write-Gate "INFO: HOW TO RUN - Quick: .\scripts\phase15-ready-gate.ps1" "Gray"
-Write-Gate "INFO: HOW TO RUN - Full (8h soak): .\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8" "Gray"
+# HOW TO RUN (commented so not executable if pasted)
+Write-Gate "# Quick: .\scripts\phase15-ready-gate.ps1 -SoakHours 0" "DarkGray"
+Write-Gate "# Full:  .\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8" "DarkGray"
 Write-Gate "INFO: Log file: $logFile" "Gray"
 Write-Gate "" "White"
 
@@ -118,4 +118,9 @@ try {
 $duration = (Get-Date) - $gateStart
 Write-Gate "GATE PASSED - Duration: $($duration.TotalMinutes.ToString('F1')) min" "Green"
 Write-Gate "INFO: Log written to $logFile" "Gray"
+Write-Gate "" "White"
+Write-Gate "Commands to run next:" "Cyan"
+Write-Gate "  .\scripts\phase15-ready-gate.ps1 -SoakHours 0" "White"
+Write-Gate "  .\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8" "White"
+Write-Gate "" "White"
 exit 0
