@@ -20,5 +20,7 @@
         <activity android:name=".InboxActivity" android:exported="false" />
         <activity android:name=".PairingActivity" android:exported="false" />
         <activity android:name=".ApprovalActivity" android:exported="false" />
+        <activity android:name=".SecretInputActivity" android:exported="false" />
+        <activity android:name=".CaptchaActivity" android:exported="false" />
     </application>
 </manifest>

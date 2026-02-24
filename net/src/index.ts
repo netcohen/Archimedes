@@ -1,12 +1,18 @@
 import * as http from "http";
-import { getEnvelopeStore } from "./firestore";
+import { getEnvelopeStore, getCurrentMode, healthCheck } from "./firestore";
+import { safeLogPayload, safeLog } from "./redactor";
+import { handleTestsite } from "./testsite";
+import { runBrowserSteps, getRunStatus, getAllRuns, isBrowserAvailable, BrowserStep } from "./browser";
 
-const PORT = 5052;
+const PORT = parseInt(process.env.PORT || "5052", 10);
 const CORE_URL = "http://localhost:5051";
 
 const envelopeQueue: string[] = [];
 
 const server = http.createServer((req, res) => {
+  if (handleTestsite(req, res)) {
+    return;
+  }
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
@@ -17,7 +23,7 @@ const server = http.createServer((req, res) => {
     req.on("data", (chunk) => (body += chunk.toString()));
     req.on("end", () => {
       envelopeQueue.push(body || "{}");
-      console.log("[Net] Received envelope:", body || "(empty)");
+      safeLogPayload("Net", body || "");
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("OK");
     });
@@ -104,12 +110,20 @@ const server = http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const store = await getEnvelopeStore();
+        const mode = store.getMode();
         const payload = body || "test envelope";
-        const id = await store.write(payload);
-        const doc = await store.read(id);
+        const operationId = req.headers["x-operation-id"] as string | undefined;
+        const result = await store.write(payload, operationId);
+        const doc = await store.read(result.id);
         const ok = doc !== null && doc.payload === payload;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id, ok, readPayload: doc?.payload }));
+        res.end(JSON.stringify({ 
+          id: result.id, 
+          ok, 
+          mode, 
+          duplicate: result.isDuplicate,
+          readPayload: doc?.payload 
+        }));
       } catch (e) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: String(e) }));
@@ -117,6 +131,116 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (req.method === "POST" && req.url === "/v1/envelope/idempotent") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", async () => {
+      try {
+        const store = await getEnvelopeStore();
+        const operationId = req.headers["x-operation-id"] as string | undefined;
+        if (!operationId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "X-Operation-Id header required" }));
+          return;
+        }
+        const result = await store.write(body, operationId);
+        res.writeHead(result.isDuplicate ? 200 : 201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          id: result.id,
+          duplicate: result.isDuplicate,
+          mode: store.getMode()
+        }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+  if (req.method === "GET" && req.url === "/v1/firebase/health") {
+    (async () => {
+      try {
+        const result = await healthCheck();
+        res.writeHead(result.ok ? 200 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, mode: getCurrentMode(), error: String(e) }));
+      }
+    })();
+    return;
+  }
+  if (req.method === "POST" && req.url === "/v1/firebase/health") {
+    (async () => {
+      try {
+        const result = await healthCheck();
+        res.writeHead(result.ok ? 200 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, mode: getCurrentMode(), error: String(e) }));
+      }
+    })();
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/tool/browser/health") {
+    (async () => {
+      try {
+        const available = await isBrowserAvailable();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ available }));
+      } catch (e) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ available: false, error: String(e) }));
+      }
+    })();
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/tool/browser/runStep") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", async () => {
+      try {
+        const { steps, runId } = JSON.parse(body) as { steps: BrowserStep[]; runId?: string };
+        if (!steps || !Array.isArray(steps)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "steps array required" }));
+          return;
+        }
+        safeLog("Browser", `Running ${steps.length} steps`);
+        const result = await runBrowserSteps(steps, runId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/tool/browser/status/")) {
+    const runId = req.url.split("/").pop() || "";
+    const status = getRunStatus(runId);
+    if (!status) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Run not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(status));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/tool/browser/runs") {
+    const runs = getAllRuns();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(runs));
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });

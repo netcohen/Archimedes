@@ -1,6 +1,6 @@
 namespace Archimedes.Core;
 
-public enum TaskState { Running, WaitingForUser, Completed }
+public enum ApprovalState { Running, WaitingForUser, Completed }
 
 public class PendingApproval
 {

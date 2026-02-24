@@ -6,6 +6,16 @@ builder.Services.AddHttpClient();
 
 var app = builder.Build();
 
+var httpClientFactory = app.Services.GetRequiredService<IHttpClientFactory>();
+var outboxHttpClient = httpClientFactory.CreateClient();
+var outboxService = new OutboxService(outboxHttpClient);
+outboxService.StartWorker();
+
+var recoveryManager = new RecoveryManager();
+
+var encryptedStore = new EncryptedStore();
+encryptedStore.Initialize();
+
 var envelopeQueue = new Queue<string>();
 var pairingSessions = new Dictionary<string, (byte[] CorePrivateKey, byte[] DevicePublicKey)>();
 var pendingApprovals = new Dictionary<string, PendingApproval>();
@@ -14,6 +24,45 @@ var approvalWait = new Dictionary<string, TaskCompletionSource<bool>>();
 var jobs = new Dictionary<string, Job>();
 var runs = new List<Run>();
 var statePath = Path.Combine(Path.GetTempPath(), "archimedes_state.json");
+
+var deviceKeyManager = new DeviceKeyManager();
+var taskService = new TaskService(encryptedStore, deviceKeyManager);
+var policyEngine = new PolicyEngine();
+var approvalService = new ApprovalService(deviceKeyManager);
+var llmAdapter = new LLMAdapter(httpClientFactory.CreateClient());
+var planner = new Planner(llmAdapter, policyEngine);
+var smartScheduler = new SmartScheduler(taskService, planner);
+smartScheduler.Start();
+
+var storageConfig = new StorageConfig
+{
+    RootInternal = Environment.GetEnvironmentVariable("ARCHIMEDES_STORAGE_INTERNAL")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Archimedes"),
+    RootExternal = Environment.GetEnvironmentVariable("ARCHIMEDES_STORAGE_EXTERNAL"),
+    LogsRetentionDays = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_LOGS_RETENTION_DAYS"), out var lrd) ? lrd : 7,
+    ArtifactsMaxGB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_ARTIFACTS_MAX_GB"), out var amg) ? amg : 10,
+    MinFreeSpaceMB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_MIN_FREE_MB"), out var mfm) ? mfm : 500
+};
+var storageManager = new StorageManager(storageConfig);
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager);
+taskRunner.Start();
+
+var selfUpdateAudit = new SelfUpdateAudit();
+var sandboxRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_SANDBOX_ROOT");
+if (string.IsNullOrWhiteSpace(sandboxRoot))
+    sandboxRoot = Path.Combine(Path.GetTempPath(), "ArchimedesSandbox");
+sandboxRoot = Path.GetFullPath(sandboxRoot);
+var releasesRoot = Path.Combine(storageManager.RootInternal, "releases");
+var repoRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_REPO_ROOT");
+if (string.IsNullOrEmpty(repoRoot))
+{
+    var d = new DirectoryInfo(AppContext.BaseDirectory);
+    while (d != null && !File.Exists(Path.Combine(d.FullName, "scripts", "phase14-ready-gate.ps1")))
+        d = d.Parent;
+    repoRoot = d?.FullName ?? Path.GetDirectoryName(AppContext.BaseDirectory) ?? AppContext.BaseDirectory;
+}
+var sandboxRunner = new SandboxRunner(sandboxRoot, repoRoot, selfUpdateAudit);
+var promotionManager = new PromotionManager(releasesRoot, selfUpdateAudit);
 
 SavedState? LoadStateFromDisk()
 {
@@ -32,7 +81,39 @@ void SaveStateToDisk(SavedState s)
 }
 
 var savedState = LoadStateFromDisk();
-if (savedState != null) Console.WriteLine($"[Recovery] Loaded state: job={savedState.JobId} run={savedState.RunId}");
+if (savedState != null) Console.WriteLine($"[Recovery] Loaded legacy state: job={savedState.JobId} run={savedState.RunId}");
+
+var recoverableRuns = recoveryManager.GetRecoverableRuns();
+foreach (var persistedRun in recoverableRuns)
+{
+    ArchLogger.LogInfo($"[Recovery] Found run {persistedRun.Id} in state {persistedRun.Status}, step={persistedRun.Step}");
+    recoveryManager.MarkRecovering(persistedRun.Id);
+    
+    var run = new Run
+    {
+        Id = persistedRun.Id,
+        JobId = persistedRun.JobId,
+        StartTime = persistedRun.StartTime,
+        Status = RunStatus.Recovering,
+        Step = persistedRun.Step,
+        Checkpoint = persistedRun.Checkpoint
+    };
+    runs.Add(run);
+    
+    _ = Task.Run(async () =>
+    {
+        ArchLogger.LogInfo($"[Recovery] Resuming run {run.Id} from step {run.Step}");
+        await Task.Delay(500);
+        run.Step++;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, $"resumed_step_{run.Step}");
+        
+        await Task.Delay(100);
+        run.Status = RunStatus.Completed;
+        run.EndTime = DateTime.UtcNow;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed);
+        ArchLogger.LogInfo($"[Recovery] Run {run.Id} completed after recovery");
+    });
+}
 
 app.MapGet("/health", () => "OK");
 
@@ -76,14 +157,24 @@ app.MapPost("/job/{id}/run", (string id) =>
     if (!jobs.TryGetValue(id, out var job))
         return Results.NotFound();
     var runId = Guid.NewGuid().ToString("N");
-    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = "running" };
+    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = RunStatus.Running, Step = 0 };
     runs.Add(run);
+    recoveryManager.TrackRun(run);
+    
     _ = Task.Run(async () =>
     {
+        run.Step = 1;
+        run.Checkpoint = "step_1_started";
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, run.Checkpoint);
+        
         await Task.Delay(100);
+        
+        run.Step = 2;
+        run.Checkpoint = "step_2_completed";
         run.EndTime = DateTime.UtcNow;
-        run.Status = "completed";
-        Console.WriteLine($"[Scheduler] Run {runId} completed for job {id}");
+        run.Status = RunStatus.Completed;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed, run.Step, run.Checkpoint);
+        ArchLogger.LogInfo($"[Scheduler] Run {runId} completed for job {id}");
     });
     return Results.Json(new { runId });
 });
@@ -93,6 +184,60 @@ app.MapGet("/run/{id}", (string id) =>
     var run = runs.FirstOrDefault(r => r.Id == id);
     if (run == null) return Results.NotFound();
     return Results.Json(run);
+});
+
+app.MapGet("/recovery/state", () =>
+{
+    var state = recoveryManager.GetState();
+    return Results.Json(new
+    {
+        runs = state.Runs.Select(r => new
+        {
+            r.Id,
+            r.JobId,
+            r.Status,
+            r.Step,
+            r.Checkpoint,
+            r.StartTime,
+            r.EndTime
+        }),
+        state.LastSaved
+    });
+});
+
+app.MapPost("/recovery/clear", () =>
+{
+    recoveryManager.ClearAll();
+    return Results.Json(new { ok = true });
+});
+
+app.MapPost("/job/{id}/run-slow", (string id) =>
+{
+    if (!jobs.TryGetValue(id, out var job))
+        return Results.NotFound();
+    var runId = Guid.NewGuid().ToString("N");
+    var run = new Run { Id = runId, JobId = id, StartTime = DateTime.UtcNow, Status = RunStatus.Running, Step = 0 };
+    runs.Add(run);
+    recoveryManager.TrackRun(run);
+    
+    _ = Task.Run(async () =>
+    {
+        for (int step = 1; step <= 5; step++)
+        {
+            run.Step = step;
+            run.Checkpoint = $"processing_step_{step}";
+            recoveryManager.UpdateRunStatus(run.Id, RunStatus.Running, run.Step, run.Checkpoint);
+            ArchLogger.LogInfo($"[Scheduler] Run {runId} step {step}/5");
+            await Task.Delay(2000);
+        }
+        
+        run.EndTime = DateTime.UtcNow;
+        run.Status = RunStatus.Completed;
+        recoveryManager.UpdateRunStatus(run.Id, RunStatus.Completed);
+        ArchLogger.LogInfo($"[Scheduler] Run {runId} completed all steps");
+    });
+    
+    return Results.Json(new { runId, message = "Slow run started (5 steps, 2s each)" });
 });
 
 var monitorTickCount = 0;
@@ -128,7 +273,7 @@ app.MapPost("/task/run-with-approval", async (HttpRequest req) =>
     var tcs = new TaskCompletionSource<bool>();
     approvalWait[taskId] = tcs;
     pendingApprovals[taskId] = new PendingApproval { TaskId = taskId, Message = message };
-    Console.WriteLine($"[Core] Task {taskId} WAITING_FOR_USER: {message}");
+    ArchLogger.LogPayload("Task approval request", message);
     var approved = await tcs.Task;
     pendingApprovals.Remove(taskId);
     approvalWait.Remove(taskId);
@@ -153,6 +298,456 @@ app.MapPost("/approval-response", async (HttpRequest req) =>
         return Results.NotFound("Unknown task");
     tcs.TrySetResult(approved);
     return Results.Json(new { ok = true });
+});
+
+app.MapGet("/v2/approvals", () =>
+{
+    var pending = approvalService.GetPendingApprovals();
+    return Results.Json(pending.Select(a => new
+    {
+        a.Id,
+        a.TaskId,
+        type = a.Type.ToString(),
+        a.Message,
+        hasCaptcha = a.CaptchaImageBase64Encrypted != null,
+        a.CreatedAt
+    }));
+});
+
+app.MapGet("/v2/approval/{id}", (string id) =>
+{
+    var approval = approvalService.GetApproval(id);
+    if (approval == null)
+        return Results.NotFound();
+    return Results.Json(new
+    {
+        approval.Id,
+        approval.TaskId,
+        type = approval.Type.ToString(),
+        approval.Message,
+        approval.CaptchaImageBase64Encrypted,
+        approval.CreatedAt
+    });
+});
+
+app.MapPost("/v2/approval/{id}/respond", async (string id, HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    
+    var response = new ApprovalResponse { ApprovalId = id };
+    
+    if (json.RootElement.TryGetProperty("approved", out var approvedProp))
+        response.Approved = approvedProp.GetBoolean();
+    if (json.RootElement.TryGetProperty("secretValue", out var secretProp))
+        response.SecretValue = secretProp.GetString();
+    if (json.RootElement.TryGetProperty("captchaSolution", out var captchaProp))
+        response.CaptchaSolution = captchaProp.GetString();
+    
+    var ok = approvalService.Respond(response);
+    return Results.Json(new { ok });
+});
+
+app.MapPost("/v2/approval/request/confirmation", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var message = json.RootElement.GetProperty("message").GetString() ?? "";
+    
+    var response = await approvalService.RequestConfirmation(taskId, message);
+    return Results.Json(new { response.Approved });
+});
+
+app.MapPost("/v2/approval/request/secret", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var prompt = json.RootElement.GetProperty("prompt").GetString() ?? "";
+    
+    var response = await approvalService.RequestSecret(taskId, prompt);
+    return Results.Json(new { response.Approved, hasSecret = response.SecretValue != null });
+});
+
+app.MapPost("/v2/approval/request/captcha", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var taskId = json.RootElement.GetProperty("taskId").GetString() ?? "";
+    var imageBase64 = json.RootElement.GetProperty("imageBase64").GetString() ?? "";
+    
+    var imageBytes = Convert.FromBase64String(imageBase64);
+    var response = await approvalService.RequestCaptcha(taskId, imageBytes);
+    return Results.Json(new { response.Approved, response.CaptchaSolution });
+});
+
+app.MapPost("/v2/approval/simulator/enable", () =>
+{
+    approvalService.EnableSimulator(request =>
+    {
+        switch (request.Type)
+        {
+            case ApprovalType.CONFIRMATION:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true };
+            case ApprovalType.SECRET_INPUT:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true, SecretValue = "simulated-secret" };
+            case ApprovalType.CAPTCHA_DECODE:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = true, CaptchaSolution = "SIMULATED" };
+            default:
+                return new ApprovalResponse { ApprovalId = request.Id, Approved = false };
+        }
+    });
+    return Results.Json(new { ok = true, mode = "simulator" });
+});
+
+app.MapPost("/v2/approval/simulator/disable", () =>
+{
+    approvalService.DisableSimulator();
+    return Results.Json(new { ok = true, mode = "real" });
+});
+
+app.MapGet("/llm/health", async () =>
+{
+    var result = await llmAdapter.HealthCheck();
+    return Results.Json(result);
+});
+
+app.MapPost("/llm/interpret", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var prompt = await r.ReadToEndAsync();
+    if (string.IsNullOrWhiteSpace(prompt))
+        return Results.BadRequest("Prompt required");
+    
+    var result = await llmAdapter.Interpret(prompt);
+    return Results.Json(result);
+});
+
+app.MapPost("/llm/summarize", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var content = await r.ReadToEndAsync();
+    if (string.IsNullOrWhiteSpace(content))
+        return Results.BadRequest("Content required");
+    
+    var result = await llmAdapter.Summarize(content);
+    return Results.Json(result);
+});
+
+app.MapPost("/planner/plan", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<PlannerRequest>(body);
+    if (request == null || string.IsNullOrWhiteSpace(request.UserPrompt))
+        return Results.BadRequest("userPrompt required");
+    
+    var taskId = request.TaskId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
+    var result = await planner.PlanTask(taskId, request.UserPrompt);
+    return Results.Json(result);
+});
+
+app.MapPost("/planner/plan-task/{id}", async (string id) =>
+{
+    var task = taskService.GetTask(id);
+    if (task == null)
+        return Results.NotFound(new { error = "Task not found" });
+    
+    var prompt = taskService.GetUserPrompt(id);
+    if (string.IsNullOrEmpty(prompt))
+        return Results.BadRequest(new { error = "Task has no prompt" });
+    
+    var result = await planner.PlanTask(id, prompt);
+    
+    if (result.Success && result.Plan != null)
+    {
+        taskService.SetPlan(id, new TaskPlanRequest
+        {
+            Intent = result.Intent,
+            Steps = result.Plan.Steps
+        });
+    }
+    
+    return Results.Json(result);
+});
+
+app.MapGet("/scheduler/stats", () => Results.Json(smartScheduler.GetStats()));
+
+app.MapGet("/availability", () => Results.Json(smartScheduler.CheckAvailability()));
+
+app.MapPost("/scheduler/enqueue/{taskId}", (string taskId, string? priority) =>
+{
+    var p = priority?.ToUpper() switch
+    {
+        "SCHEDULED" => TaskPriority.SCHEDULED,
+        "BACKGROUND" => TaskPriority.BACKGROUND,
+        _ => TaskPriority.IMMEDIATE
+    };
+    smartScheduler.Enqueue(taskId, p);
+    return Results.Json(new { ok = true, taskId, priority = p.ToString() });
+});
+
+app.MapPost("/scheduler/monitoring", (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = r.ReadToEnd();
+    var request = JsonSerializer.Deserialize<MonitoringRequest>(body);
+    if (request == null || string.IsNullOrWhiteSpace(request.TaskId))
+        return Results.BadRequest("taskId required");
+    
+    smartScheduler.RegisterMonitoring(
+        request.TaskId,
+        request.IntervalMs,
+        request.MaxJitterMs ?? 5000,
+        request.BackoffMultiplier ?? 1.5);
+    
+    return Results.Json(new { ok = true, taskId = request.TaskId, intervalMs = request.IntervalMs });
+});
+
+app.MapDelete("/scheduler/monitoring/{taskId}", (string taskId) =>
+{
+    smartScheduler.UnregisterMonitoring(taskId);
+    return Results.Json(new { ok = true, taskId });
+});
+
+// Scheduler config - GET returns current config, POST updates
+app.MapGet("/scheduler/config", () =>
+{
+    var runnerConfig = taskRunner.GetConfig();
+    return Results.Json(new
+    {
+        runnerIntervalMs = runnerConfig.RunnerIntervalMs,
+        watchdogSeconds = runnerConfig.WatchdogSeconds,
+        maxTasksPerTick = runnerConfig.MaxTasksPerTick,
+        tickBudgetMs = runnerConfig.TickBudgetMs,
+        schedulerStats = smartScheduler.GetStats()
+    });
+});
+
+app.MapPost("/scheduler/config", async (HttpRequest req) =>
+{
+    try
+    {
+        using var r = new StreamReader(req.Body);
+        var body = await r.ReadToEndAsync();
+        
+        if (string.IsNullOrWhiteSpace(body) || body == "{}")
+        {
+            return Results.Json(new
+            {
+                ok = true,
+                message = "No changes applied",
+                config = taskRunner.GetConfig()
+            });
+        }
+        
+        var request = JsonSerializer.Deserialize<RunnerConfig>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (request == null)
+        {
+            return Results.BadRequest(new { error = "Invalid JSON format" });
+        }
+        
+        // Validate inputs
+        var errors = new List<string>();
+        if (request.RunnerIntervalMs.HasValue && request.RunnerIntervalMs.Value < 100)
+            errors.Add("runnerIntervalMs must be >= 100");
+        if (request.WatchdogSeconds.HasValue && request.WatchdogSeconds.Value < 30)
+            errors.Add("watchdogSeconds must be >= 30");
+        if (request.MaxTasksPerTick.HasValue && request.MaxTasksPerTick.Value < 1)
+            errors.Add("maxTasksPerTick must be >= 1");
+        if (request.TickBudgetMs.HasValue && request.TickBudgetMs.Value < 100)
+            errors.Add("tickBudgetMs must be >= 100");
+        
+        if (errors.Any())
+        {
+            return Results.BadRequest(new { error = "Validation failed", details = errors });
+        }
+        
+        taskRunner.Configure(request);
+        
+        return Results.Json(new { ok = true, config = taskRunner.GetConfig() });
+    }
+    catch (JsonException ex)
+    {
+        return Results.BadRequest(new { error = "Invalid JSON", details = ex.Message });
+    }
+    catch (Exception ex)
+    {
+        ArchLogger.LogError($"[API] /scheduler/config error: {ex.Message}");
+        return Results.BadRequest(new { error = "Configuration error", details = ex.Message });
+    }
+});
+
+// Debug endpoints
+app.MapGet("/task/{id}/trace", (string id) =>
+{
+    var trace = taskRunner.GetTaskTrace(id);
+    if (trace == null)
+        return Results.NotFound(new { error = "Task not found" });
+    return Results.Json(trace);
+});
+
+app.MapGet("/tasks/running", () =>
+{
+    var runningTasks = taskRunner.GetRunningTasks();
+    return Results.Json(new
+    {
+        count = runningTasks.Count,
+        tasks = runningTasks,
+        runnerStats = taskRunner.GetStats()
+    });
+});
+
+app.MapGet("/health/deep", async () =>
+{
+    var runnerStats = taskRunner.GetStats();
+    var runningTasks = taskRunner.GetRunningTasks();
+    
+    // Check Net health
+    bool netHealthy = false;
+    try
+    {
+        var netClient = httpClientFactory.CreateClient();
+        netClient.Timeout = TimeSpan.FromSeconds(5);
+        var netResponse = await netClient.GetAsync("http://localhost:5052/health");
+        netHealthy = netResponse.IsSuccessStatusCode;
+    }
+    catch { }
+    
+    // Get monitor ticks
+    int? monitorTicks = null;
+    try
+    {
+        var monitorClient = httpClientFactory.CreateClient();
+        monitorClient.Timeout = TimeSpan.FromSeconds(2);
+        var ticksResponse = await monitorClient.GetStringAsync("http://localhost:5051/monitor/ticks");
+        if (int.TryParse(ticksResponse.Trim(), out var ticks))
+            monitorTicks = ticks;
+    }
+    catch { }
+    
+    return Results.Json(new
+    {
+        status = "ok",
+        runner = new
+        {
+            running = runnerStats.Running,
+            lastHeartbeat = runnerStats.LastHeartbeat,
+            heartbeatAgeSeconds = (DateTime.UtcNow - runnerStats.LastHeartbeat).TotalSeconds,
+            watchdogEnabled = runnerStats.WatchdogEnabled,
+            totalTicksProcessed = runnerStats.TotalTicksProcessed,
+            totalStepsExecuted = runnerStats.TotalStepsExecuted
+        },
+        tasks = new
+        {
+            runningCount = runningTasks.Count,
+            oldestAgeSeconds = runningTasks.Any() ? runningTasks.Max(t => t.AgeSeconds) : 0
+        },
+        net = new
+        {
+            healthy = netHealthy
+        },
+        monitor = new
+        {
+            ticks = monitorTicks
+        },
+        config = runnerStats.Config
+    });
+});
+
+app.MapGet("/storage/health", () =>
+{
+    var report = storageManager.GetHealthReport();
+    return Results.Json(report);
+});
+
+app.MapPost("/storage/cleanup", () =>
+{
+    var result = storageManager.RunCleanup();
+    return Results.Json(result);
+});
+
+app.MapGet("/selfupdate/status", () =>
+{
+    var status = promotionManager.GetStatus();
+    return Results.Json(new
+    {
+        currentVersion = status.CurrentVersion,
+        canaryVersion = status.CanaryVersion,
+        releasesRoot = status.ReleasesRoot,
+        sandboxRoot = sandboxRoot,
+        recentMetricsCount = status.RecentMetrics.Count
+    });
+});
+
+app.MapPost("/selfupdate/sandbox-run", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var commit = "HEAD";
+    var soakHours = 0;
+    var dryRun = false;
+    if (!string.IsNullOrWhiteSpace(body))
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("commit", out var c)) commit = c.GetString() ?? "HEAD";
+            if (doc.RootElement.TryGetProperty("soakHours", out var s)) soakHours = s.GetInt32();
+            if (doc.RootElement.TryGetProperty("dryRun", out var d)) dryRun = d.GetBoolean();
+        }
+        catch { }
+    }
+    var result = await Task.Run(() => sandboxRunner.Run(commit, soakHours, dryRun));
+    return Results.Json(result);
+});
+
+app.MapPost("/selfupdate/promote", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    string? candidateId = null;
+    string? sandboxPath = null;
+    double? canaryPercent = null;
+    if (!string.IsNullOrWhiteSpace(body))
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("candidateId", out var c)) candidateId = c.GetString();
+            if (doc.RootElement.TryGetProperty("sandboxPath", out var s)) sandboxPath = s.GetString();
+            if (doc.RootElement.TryGetProperty("canaryPercent", out var p)) canaryPercent = p.GetDouble();
+        }
+        catch { }
+    }
+    if (string.IsNullOrEmpty(candidateId) || string.IsNullOrEmpty(sandboxPath))
+        return Results.BadRequest("candidateId and sandboxPath required");
+    var sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Release", "net8.0");
+    if (!Directory.Exists(sandboxCore))
+        sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Debug", "net8.0");
+    if (!Directory.Exists(sandboxCore))
+        return Results.NotFound("Candidate build not found");
+    var ok = promotionManager.Promote(candidateId, sandboxPath, canaryPercent);
+    return Results.Json(new { ok });
+});
+
+app.MapPost("/selfupdate/rollback", () =>
+{
+    var ok = promotionManager.Rollback();
+    return Results.Json(new { ok });
+});
+
+app.MapGet("/selfupdate/audit", (int? skip, int? take) =>
+{
+    var skipVal = skip ?? 0;
+    var takeVal = take ?? 50;
+    var events = selfUpdateAudit.GetEvents(skipVal, takeVal);
+    return Results.Json(new { events, total = events.Count });
 });
 
 app.MapGet("/pairing-data", () =>
@@ -186,7 +781,7 @@ app.MapPost("/envelope", async (HttpRequest req) =>
     using var r = new StreamReader(req.Body);
     var body = await r.ReadToEndAsync();
     envelopeQueue.Enqueue(string.IsNullOrEmpty(body) ? "{}" : body);
-    Console.WriteLine($"[Core] Received envelope: {body}");
+    ArchLogger.LogPayload("Envelope received", body);
     return Results.Text("OK", "text/plain");
 });
 
@@ -237,10 +832,332 @@ app.MapPost("/crypto-test", async (HttpRequest req) =>
     var (pub, priv) = Crypto.GenerateKeyPair();
     var enc = Crypto.EncryptBase64(message, pub);
     var dec = Crypto.DecryptBase64(enc, priv);
-    return Results.Json(new { encrypted = enc, decrypted = dec, ok = dec == message });
+    return Results.Json(new { version = 1, algorithm = "RSA-OAEP-SHA256", encrypted = enc, decrypted = dec, ok = dec == message });
 });
 
-var port = 5051;
+app.MapPost("/task", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    CreateTaskRequest? request;
+    try
+    {
+        request = JsonSerializer.Deserialize<CreateTaskRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    }
+    catch (JsonException)
+    {
+        return Results.BadRequest("Invalid JSON");
+    }
+    if (request == null)
+        return Results.BadRequest("Invalid request");
+    
+    try
+    {
+        var task = taskService.CreateTask(request);
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapGet("/task/{id}", (string id) =>
+{
+    var task = taskService.GetTask(id);
+    if (task == null)
+        return Results.NotFound();
+    return Results.Json(TaskResponse.FromTask(task));
+});
+
+app.MapGet("/tasks", (HttpRequest req) =>
+{
+    TaskState? stateFilter = null;
+    if (req.Query.TryGetValue("state", out var stateVal) && 
+        Enum.TryParse<TaskState>(stateVal.FirstOrDefault(), true, out var parsed))
+    {
+        stateFilter = parsed;
+    }
+    
+    var tasks = taskService.GetTasks(stateFilter);
+    return Results.Json(tasks.Select(TaskResponse.FromTask));
+});
+
+app.MapPost("/task/{id}/plan", async (string id, HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<TaskPlanRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (request == null)
+        return Results.BadRequest("Invalid plan request");
+    
+    try
+    {
+        var task = taskService.SetPlan(id, request);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/run", (string id) =>
+{
+    try
+    {
+        var task = taskService.StartRun(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/pause", (string id) =>
+{
+    try
+    {
+        var task = taskService.Pause(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/resume", (string id) =>
+{
+    try
+    {
+        var task = taskService.Resume(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapPost("/task/{id}/cancel", (string id) =>
+{
+    try
+    {
+        var task = taskService.Cancel(id);
+        if (task == null)
+            return Results.NotFound();
+        return Results.Json(TaskResponse.FromTask(task));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(ex.Message);
+    }
+});
+
+app.MapGet("/policy/rules", () =>
+{
+    var rules = policyEngine.GetRules();
+    return Results.Json(rules.Select(r => new
+    {
+        r.Id,
+        r.Description,
+        r.DomainPattern,
+        r.DomainAllowlist,
+        r.DomainDenylist,
+        entityScope = r.EntityScope?.ToString(),
+        actionKind = r.ActionKind?.ToString(),
+        decision = r.Decision.ToString(),
+        r.Priority,
+        r.Enabled
+    }));
+});
+
+app.MapPost("/policy/rules", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var rule = JsonSerializer.Deserialize<PolicyRule>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (rule == null)
+        return Results.BadRequest("Invalid rule");
+    
+    policyEngine.AddRule(rule);
+    return Results.Json(new { ok = true, ruleId = rule.Id });
+});
+
+app.MapDelete("/policy/rules/{id}", (string id) =>
+{
+    var removed = policyEngine.RemoveRule(id);
+    return Results.Json(new { ok = removed });
+});
+
+app.MapPost("/policy/evaluate", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<PolicyEvaluationRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    if (request == null)
+        return Results.BadRequest("Invalid request");
+    
+    var result = policyEngine.Evaluate(request);
+    return Results.Json(new
+    {
+        decision = result.Decision.ToString(),
+        result.MatchedRuleId,
+        result.Reason,
+        result.EvaluatedRules
+    });
+});
+
+app.MapPost("/crypto/v2/test", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var message = await r.ReadToEndAsync();
+    if (string.IsNullOrEmpty(message)) message = "test secret message";
+
+    var keys = deviceKeyManager.GetOrCreateKeyPair();
+    var deviceId = "core-device";
+    var operationId = Guid.NewGuid().ToString("N");
+
+    var envelope = ModernCrypto.Encrypt(message, keys.PublicKey, deviceId, operationId);
+    var decrypted = ModernCrypto.Decrypt(envelope, keys.PrivateKey);
+
+    return Results.Json(new
+    {
+        version = 2,
+        algorithm = "X25519+ChaCha20-Poly1305",
+        envelope = new
+        {
+            envelope.Version,
+            envelope.DeviceId,
+            envelope.OperationId,
+            envelope.Timestamp,
+            envelope.Nonce,
+            ciphertextLength = envelope.Ciphertext.Length,
+            ephemeralPublicKeyLength = envelope.EphemeralPublicKey.Length
+        },
+        decrypted,
+        ok = decrypted == message,
+        plaintextNotInEnvelope = !envelope.Ciphertext.Contains(message)
+    });
+});
+
+app.MapGet("/crypto/v2/publickey", () =>
+{
+    var publicKey = deviceKeyManager.GetPublicKeyBase64();
+    return Results.Json(new { publicKey, algorithm = "X25519" });
+});
+
+app.MapPost("/crypto/v2/encrypt", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    
+    var message = json.RootElement.GetProperty("message").GetString() ?? "";
+    var recipientPublicKeyB64 = json.RootElement.GetProperty("recipientPublicKey").GetString() ?? "";
+    var deviceId = json.RootElement.TryGetProperty("deviceId", out var d) ? d.GetString() ?? "unknown" : "unknown";
+    var operationId = json.RootElement.TryGetProperty("operationId", out var o) ? o.GetString() ?? Guid.NewGuid().ToString("N") : Guid.NewGuid().ToString("N");
+
+    var recipientPublicKey = Convert.FromBase64String(recipientPublicKeyB64);
+    var envelopeJson = ModernCrypto.EncryptToJson(message, recipientPublicKey, deviceId, operationId);
+
+    return Results.Text(envelopeJson, "application/json");
+});
+
+app.MapPost("/crypto/v2/decrypt", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var envelopeJson = await r.ReadToEndAsync();
+    
+    var keys = deviceKeyManager.GetOrCreateKeyPair();
+    var decrypted = ModernCrypto.DecryptFromJson(envelopeJson, keys.PrivateKey);
+
+    return Results.Json(new { decrypted });
+});
+
+app.MapPost("/outbox/enqueue", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    var json = JsonDocument.Parse(body);
+    var operationId = json.RootElement.GetProperty("operationId").GetString() ?? Guid.NewGuid().ToString("N");
+    var payload = json.RootElement.GetProperty("payload").GetString() ?? "";
+    var destination = json.RootElement.GetProperty("destination").GetString() ?? "http://localhost:5052/envelope";
+
+    var result = outboxService.Enqueue(operationId, payload, destination);
+    return Results.Json(new
+    {
+        ok = result.Success,
+        entryId = result.EntryId,
+        duplicate = result.IsDuplicate,
+        error = result.Error
+    });
+});
+
+app.MapGet("/outbox/entries", () =>
+{
+    var entries = outboxService.GetAllEntries().Select(e => new
+    {
+        e.Id,
+        e.OperationId,
+        status = e.Status.ToString(),
+        e.Attempts,
+        e.NextRetry,
+        e.Error
+    });
+    return Results.Json(entries);
+});
+
+app.MapGet("/outbox/stats", () =>
+{
+    var stats = outboxService.GetStats();
+    return Results.Json(stats);
+});
+
+app.MapPost("/outbox/drain", async () =>
+{
+    var sent = await outboxService.DrainAsync();
+    return Results.Json(new { drained = sent });
+});
+
+app.MapGet("/store/stats", () =>
+{
+    var stats = encryptedStore.GetStats();
+    return Results.Json(stats);
+});
+
+app.MapPost("/store/test", async (HttpRequest req) =>
+{
+    using var r = new StreamReader(req.Body);
+    var body = await r.ReadToEndAsync();
+    
+    var testJobId = Guid.NewGuid().ToString("N");
+    var testJob = new Job { Id = testJobId, Type = "test", Payload = body ?? "test" };
+    encryptedStore.SaveJob(testJob);
+    
+    var loaded = encryptedStore.GetJob(testJobId);
+    var stats = encryptedStore.GetStats();
+    
+    return Results.Json(new
+    {
+        ok = loaded != null && loaded.Payload == testJob.Payload,
+        jobId = testJobId,
+        isEncrypted = stats.IsEncrypted,
+        stats
+    });
+});
+
+var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
 app.Run();
