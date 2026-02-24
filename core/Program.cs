@@ -723,6 +723,11 @@ app.MapPost("/selfupdate/promote", async (HttpRequest req) =>
     }
     if (string.IsNullOrEmpty(candidateId) || string.IsNullOrEmpty(sandboxPath))
         return Results.BadRequest("candidateId and sandboxPath required");
+    var sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Release", "net8.0");
+    if (!Directory.Exists(sandboxCore))
+        sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Debug", "net8.0");
+    if (!Directory.Exists(sandboxCore))
+        return Results.NotFound("Candidate build not found");
     var ok = promotionManager.Promote(candidateId, sandboxPath, canaryPercent);
     return Results.Json(new { ok });
 });

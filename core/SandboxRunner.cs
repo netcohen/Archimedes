@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -29,11 +30,14 @@ public class SandboxRunner
     {
         var runId = $"sb-{DateTime.UtcNow:yyyyMMddHHmmss}";
         var sandboxDir = Path.Combine(_sandboxRoot, runId);
-        var dataPath = Path.Combine(sandboxDir, "archimedes-data");
+        var sandboxPath = Path.GetFullPath(sandboxDir);
+        var buildLogPath = Path.Combine(sandboxDir, "build.log");
+
+        Directory.CreateDirectory(sandboxDir);
 
         try
         {
-            Directory.CreateDirectory(sandboxDir);
+            var dataPath = Path.Combine(sandboxDir, "archimedes-data");
             Directory.CreateDirectory(dataPath);
 
             CopyRepoToSandbox(sandboxDir);
@@ -42,15 +46,23 @@ public class SandboxRunner
             {
                 RunId = runId,
                 CommitOrRef = commitOrRef,
-                SandboxPath = sandboxDir,
+                SandboxPath = sandboxPath,
                 CreatedAt = DateTime.UtcNow
             };
 
-            var built = BuildInSandbox(sandboxDir, manifest, skipNetBuild: dryRun);
+            var (built, buildErrorDetails) = BuildInSandbox(sandboxDir, buildLogPath, skipNetBuild: dryRun);
             if (!built)
             {
-                _audit.Log("sandbox-run", runId, "Build failed", false);
-                return new SandboxRunResult { Success = false, RunId = runId, Error = "Build failed" };
+                _audit.Log("sandbox-run", runId, $"Build failed (sandboxPath={sandboxPath})", false);
+                return new SandboxRunResult
+                {
+                    Success = false,
+                    RunId = runId,
+                    SandboxPath = sandboxPath,
+                    BuildLogPath = File.Exists(buildLogPath) ? Path.GetFullPath(buildLogPath) : null,
+                    Error = "Build failed",
+                    ErrorDetails = buildErrorDetails
+                };
             }
 
             if (dryRun)
@@ -63,6 +75,8 @@ public class SandboxRunner
                 {
                     Success = true,
                     RunId = runId,
+                    SandboxPath = sandboxPath,
+                    BuildLogPath = File.Exists(buildLogPath) ? Path.GetFullPath(buildLogPath) : null,
                     CandidateId = manifest.CandidateId,
                     Manifest = manifest
                 };
@@ -98,6 +112,8 @@ public class SandboxRunner
                 {
                     Success = gateResult,
                     RunId = runId,
+                    SandboxPath = sandboxPath,
+                    BuildLogPath = File.Exists(buildLogPath) ? Path.GetFullPath(buildLogPath) : null,
                     CandidateId = manifest.CandidateId,
                     Manifest = manifest,
                     Error = gateResult ? null : "Gate failed"
@@ -112,7 +128,14 @@ public class SandboxRunner
         catch (Exception ex)
         {
             _audit.Log("sandbox-run", runId, ex.Message, false);
-            return new SandboxRunResult { Success = false, RunId = runId, Error = ex.Message };
+            return new SandboxRunResult
+            {
+                Success = false,
+                RunId = runId,
+                SandboxPath = sandboxPath,
+                BuildLogPath = File.Exists(buildLogPath) ? Path.GetFullPath(buildLogPath) : null,
+                Error = ex.Message
+            };
         }
     }
 
@@ -150,16 +173,21 @@ public class SandboxRunner
         }
     }
 
-    private bool BuildInSandbox(string sandboxDir, CandidateManifest manifest, bool skipNetBuild = false)
+    private (bool success, string? errorDetails) BuildInSandbox(string sandboxDir, string buildLogPath, bool skipNetBuild = false)
     {
+        var logLines = new List<string>();
+        void AppendLog(string? line) { if (line != null) logLines.Add(line); }
+
         try
         {
             var coreDir = Path.Combine(sandboxDir, "core");
             var config = skipNetBuild ? "Debug" : "Release";
+            var coreOutDir = Path.Combine(coreDir, "bin", config, "net8.0");
+
             var psi = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = $"build -c {config}",
+                Arguments = $"publish Archimedes.Core.csproj -c {config} -o \"{coreOutDir.Replace("\"", "\\\"")}\"",
                 WorkingDirectory = coreDir,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -167,18 +195,30 @@ public class SandboxRunner
                 CreateNoWindow = true
             };
             using var p = Process.Start(psi);
-            if (p == null) return false;
+            if (p == null) return (false, "Process.Start returned null");
+            var stdout = p.StandardOutput.ReadToEnd();
+            var stderr = p.StandardError.ReadToEnd();
             p.WaitForExit(120000);
-            if (p.ExitCode != 0) return false;
+            var output = stdout + "\n" + stderr;
+            foreach (var line in output.Split('\n')) AppendLog(line.TrimEnd());
 
-            if (skipNetBuild) return true;
+            try { File.WriteAllText(buildLogPath, output); } catch { }
+
+            if (p.ExitCode != 0)
+            {
+                var last50 = string.Join("\n", logLines.TakeLast(50));
+                var redacted = RedactBuildOutput(last50);
+                return (false, redacted);
+            }
+
+            if (skipNetBuild) return (true, null);
 
             var netDir = Path.Combine(sandboxDir, "net");
             if (File.Exists(Path.Combine(netDir, "package.json")))
             {
                 try
                 {
-                    var npm = Process.Start(new ProcessStartInfo
+                    var npmPsi = new ProcessStartInfo
                     {
                         FileName = "npm",
                         Arguments = "run build",
@@ -187,16 +227,41 @@ public class SandboxRunner
                         RedirectStandardError = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
-                    });
-                    npm?.WaitForExit(90000);
-                    if (npm != null && npm.ExitCode != 0) return false;
+                    };
+                    var npm = Process.Start(npmPsi);
+                    if (npm != null)
+                    {
+                        var npmOut = npm.StandardOutput.ReadToEnd() + "\n" + npm.StandardError.ReadToEnd();
+                        foreach (var line in npmOut.Split('\n')) AppendLog(line.TrimEnd());
+                        try { File.AppendAllText(buildLogPath, "\n--- npm build ---\n" + npmOut); } catch { }
+                        npm.WaitForExit(90000);
+                        if (npm.ExitCode != 0)
+                        {
+                            var last50 = string.Join("\n", logLines.TakeLast(50));
+                            return (false, RedactBuildOutput(last50));
+                        }
+                    }
                 }
-                catch { return false; }
+                catch (Exception ex) { return (false, ex.Message); }
             }
 
-            return true;
+            return (true, null);
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            try { File.WriteAllText(buildLogPath, ex.ToString()); } catch { }
+            return (false, ex.Message);
+        }
+    }
+
+    private static string RedactBuildOutput(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var r = s;
+        r = System.Text.RegularExpressions.Regex.Replace(r, @"eyJ[A-Za-z0-9_-]{20,}", "eyJ***REDACTED***");
+        r = System.Text.RegularExpressions.Regex.Replace(r, @"-----BEGIN[^Z]*-----", "***REDACTED***");
+        r = System.Text.RegularExpressions.Regex.Replace(r, @"password[=\s:]+[^\s""'`]+", "password=***");
+        return r.Length > 2000 ? r[^2000..] : r;
     }
 
     private Process? StartCore(string sandboxDir, string dataPath)
@@ -283,9 +348,12 @@ public class SandboxRunResult
 {
     public bool Success { get; set; }
     public string RunId { get; set; } = "";
+    public string SandboxPath { get; set; } = "";
+    public string? BuildLogPath { get; set; }
     public string? CandidateId { get; set; }
     public CandidateManifest? Manifest { get; set; }
     public string? Error { get; set; }
+    public string? ErrorDetails { get; set; }
 }
 
 public class CandidateManifest
