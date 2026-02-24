@@ -1434,3 +1434,12 @@ With 8-hour Phase 14 soak:
 - Full (8h Phase 14 soak): `.\scripts\phase15-ready-gate.ps1 -IncludePhase14Soak -SoakHours 8`
 
 **Logs:** `logs/gates/phase15-gate-<timestamp>.log`
+
+### Phase 15 HOTFIX v2 (WARN-elimination, soak accounting, redaction, storage)
+
+**What changed:**
+- **Chaos (phase14-chaos.ps1):** Invalid Input Handling expects 400/422; 500 → FAIL with diagnostics dump (`/health/deep`, `/tasks/running`, `/task/{id}/trace`), no WARN-only pass
+- **Soak (run-soak.ps1):** Baseline counters at start; delta counts (created/completed/failed) from our taskIds at end; summary JSON has `Baseline` (absolute) and `Delta` (type: delta); PASS requires `deltaFailed == 0`
+- **Self-update (phase15-selfupdate.ps1):** Expanded redaction patterns (Authorization: Bearer, refresh_token, access_token, api_key, private_key_id, BEGIN PRIVATE KEY, JWT, password=); on detection, dump offending snippet (80 chars, redacted) and FAIL
+- **Storage (phase15-storage.ps1):** "not configured" vs "configured but broken" – PASS only if `ARCHIMEDES_STORAGE_NOT_CONFIGURED_EXPECTED=true` when roots not configured; configured paths must exist and be writable; resilient cleanup (tries temp then logs)
+- **Gates (phase14/15-ready-gate.ps1):** How-to-run lines prefixed with `#`; "Commands to run next:" section at end with valid commands only
