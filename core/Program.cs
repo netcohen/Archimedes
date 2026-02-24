@@ -830,7 +830,15 @@ app.MapPost("/task", async (HttpRequest req) =>
 {
     using var r = new StreamReader(req.Body);
     var body = await r.ReadToEndAsync();
-    var request = JsonSerializer.Deserialize<CreateTaskRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    CreateTaskRequest? request;
+    try
+    {
+        request = JsonSerializer.Deserialize<CreateTaskRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    }
+    catch (JsonException)
+    {
+        return Results.BadRequest("Invalid JSON");
+    }
     if (request == null)
         return Results.BadRequest("Invalid request");
     
