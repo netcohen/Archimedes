@@ -44,7 +44,10 @@ var storageConfig = new StorageConfig
     MinFreeSpaceMB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_MIN_FREE_MB"), out var mfm) ? mfm : 500
 };
 var storageManager = new StorageManager(storageConfig);
-var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager);
+// Phase 19: Observability — TraceService (singleton, no DI needed)
+var traceService = new TraceService();
+
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager, traceService);
 taskRunner.Start();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
@@ -114,6 +117,31 @@ foreach (var persistedRun in recoverableRuns)
         ArchLogger.LogInfo($"[Recovery] Run {run.Id} completed after recovery");
     });
 }
+
+// ── Phase 19: Observability middleware ────────────────────────────────────────
+// Every request gets a CorrelationId, a trace is opened and closed automatically.
+app.Use(async (ctx, next) =>
+{
+    var corrId = ctx.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+        ?? Guid.NewGuid().ToString("N")[..16];
+
+    ctx.Items["CorrelationId"] = corrId;
+    ctx.Response.Headers["X-Correlation-Id"] = corrId;
+
+    traceService.Begin(corrId, ctx.Request.Path, ctx.Request.Method);
+
+    try
+    {
+        await next();
+        var success = ctx.Response.StatusCode < 400;
+        traceService.Complete(corrId, success, ctx.Response.StatusCode);
+    }
+    catch (Exception ex)
+    {
+        traceService.Complete(corrId, false, 500, FailureCode.STEP_EXECUTION_FAILED, ex.Message);
+        throw;
+    }
+});
 
 app.MapGet("/health", () => "OK");
 
@@ -419,13 +447,27 @@ app.MapGet("/llm/health", async () =>
 
 app.MapPost("/llm/interpret", async (HttpRequest req) =>
 {
+    var corrId = req.HttpContext.Items["CorrelationId"]?.ToString() ?? "unknown";
+
     using var r = new StreamReader(req.Body);
     var prompt = await r.ReadToEndAsync();
     if (string.IsNullOrWhiteSpace(prompt))
         return Results.BadRequest("Prompt required");
-    
-    var result = await llmAdapter.Interpret(prompt);
-    return Results.Json(result);
+
+    traceService.BeginStep(corrId, "LLM.Interpret");
+    try
+    {
+        var result = await llmAdapter.Interpret(prompt);
+        var code = result.IsHeuristicFallback ? FailureCode.INTENT_AMBIGUOUS : FailureCode.None;
+        traceService.CompleteStep(corrId, "LLM.Interpret", true, code,
+            $"intent={result.Intent} confidence={result.Confidence:F2} heuristic={result.IsHeuristicFallback}");
+        return Results.Json(result);
+    }
+    catch (Exception ex)
+    {
+        traceService.CompleteStep(corrId, "LLM.Interpret", false, FailureCode.LLM_INFERENCE_ERROR, ex.Message);
+        throw;
+    }
 });
 
 app.MapPost("/llm/summarize", async (HttpRequest req) =>
@@ -441,15 +483,30 @@ app.MapPost("/llm/summarize", async (HttpRequest req) =>
 
 app.MapPost("/planner/plan", async (HttpRequest req) =>
 {
+    var corrId = req.HttpContext.Items["CorrelationId"]?.ToString() ?? "unknown";
+
     using var r = new StreamReader(req.Body);
     var body = await r.ReadToEndAsync();
     var request = JsonSerializer.Deserialize<PlannerRequest>(body);
     if (request == null || string.IsNullOrWhiteSpace(request.UserPrompt))
         return Results.BadRequest("userPrompt required");
-    
+
     var taskId = request.TaskId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
-    var result = await planner.PlanTask(taskId, request.UserPrompt);
-    return Results.Json(result);
+
+    traceService.BeginStep(corrId, "Planner.Plan");
+    try
+    {
+        var result = await planner.PlanTask(taskId, request.UserPrompt);
+        var code = result.Success ? FailureCode.None : FailureCode.PLAN_GENERATION_FAILED;
+        traceService.CompleteStep(corrId, "Planner.Plan", result.Success, code,
+            $"intent={result.Intent} steps={result.Plan?.Steps.Count ?? 0}");
+        return Results.Json(result);
+    }
+    catch (Exception ex)
+    {
+        traceService.CompleteStep(corrId, "Planner.Plan", false, FailureCode.PLAN_GENERATION_FAILED, ex.Message);
+        throw;
+    }
 });
 
 app.MapPost("/planner/plan-task/{id}", async (string id) =>
@@ -590,6 +647,65 @@ app.MapGet("/task/{id}/trace", (string id) =>
     if (trace == null)
         return Results.NotFound(new { error = "Task not found" });
     return Results.Json(trace);
+});
+
+// ── Phase 19: Observability — Trace API ──────────────────────────────────────
+app.MapGet("/traces", (int? limit) =>
+{
+    var count = Math.Min(limit ?? 20, 100);
+    var recent = traceService.GetRecent(count);
+    return Results.Json(new
+    {
+        count        = recent.Count,
+        activeCount  = traceService.ActiveCount,
+        bufferCount  = traceService.CompletedCount,
+        traces       = recent.Select(t => new
+        {
+            t.CorrelationId,
+            t.Endpoint,
+            t.Method,
+            t.StartedAtUtc,
+            t.TotalDurationMs,
+            t.Success,
+            t.HttpStatusCode,
+            failureCode  = t.FailureCode.ToString(),
+            stepCount    = t.Steps.Count,
+            t.TaskId
+        })
+    });
+});
+
+app.MapGet("/traces/{correlationId}", (string correlationId) =>
+{
+    var trace = traceService.Get(correlationId);
+    if (trace == null)
+        return Results.NotFound(new { error = $"Trace '{correlationId}' not found" });
+
+    return Results.Json(new
+    {
+        trace.CorrelationId,
+        trace.TaskId,
+        trace.Endpoint,
+        trace.Method,
+        trace.StartedAtUtc,
+        trace.CompletedAtUtc,
+        trace.TotalDurationMs,
+        trace.Success,
+        trace.HttpStatusCode,
+        failureCode    = trace.FailureCode.ToString(),
+        trace.FailureMessage,
+        steps = trace.Steps.Select(s => new
+        {
+            s.Index,
+            s.Name,
+            s.StartedAtUtc,
+            s.CompletedAtUtc,
+            s.DurationMs,
+            s.Success,
+            failureCode = s.FailureCode.ToString(),
+            s.Details
+        })
+    });
 });
 
 app.MapGet("/tasks/running", () =>

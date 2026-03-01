@@ -37,17 +37,20 @@ public class TaskRunner
     private const int MaxTraceLogs = 500;
     
     private readonly StorageManager? _storageManager;
+    private readonly TraceService?   _traceService;   // Phase 19: Observability
 
     // Separate client for browser calls — longer timeout (Playwright can be slow)
     private readonly HttpClient _browserHttpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
     private readonly string _netBaseUrl;
 
-    public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient, StorageManager? storageManager = null)
+    public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient,
+        StorageManager? storageManager = null, TraceService? traceService = null)
     {
-        _taskService = taskService;
-        _planner = planner;
-        _httpClient = httpClient;
+        _taskService    = taskService;
+        _planner        = planner;
+        _httpClient     = httpClient;
         _storageManager = storageManager;
+        _traceService   = traceService;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
         _netBaseUrl = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
     }
@@ -257,13 +260,22 @@ public class TaskRunner
                     return;
                 }
                 
+                // Phase 19: trace planning step
+                var planCorrId = $"task_{task.TaskId}";
+                _traceService?.BeginStep(planCorrId, "TaskRunner.Plan");
+
                 var planResult = await _planner.PlanTask(task.TaskId, prompt);
                 if (!planResult.Success || planResult.Plan == null)
                 {
+                    _traceService?.CompleteStep(planCorrId, "TaskRunner.Plan", false,
+                        FailureCode.PLAN_GENERATION_FAILED, planResult.Error);
                     _taskService.Fail(task.TaskId, $"PlanningFailed: {planResult.Error}");
                     AddTrace("ERROR", $"Planning failed: {planResult.Error}", task.TaskId);
                     return;
                 }
+
+                _traceService?.CompleteStep(planCorrId, "TaskRunner.Plan", true, FailureCode.None,
+                    $"intent={planResult.Intent} steps={planResult.Plan.Steps.Count}");
                 
                 // Persist plan
                 _taskService.SetPlan(task.TaskId, new TaskPlanRequest
@@ -293,10 +305,16 @@ public class TaskRunner
                 var step = plan.Steps[task.CurrentStep];
                 AddTrace("INFO", $"Executing step {task.CurrentStep + 1}/{plan.Steps.Count}: {step.Action}", task.TaskId);
                 
+                // Phase 19: trace step execution
+                var stepCorrId = $"task_{task.TaskId}";
+                var stepLabel  = $"Step{task.CurrentStep + 1}.{step.Action}";
+                _traceService?.BeginStep(stepCorrId, stepLabel);
+
                 var result = await ExecuteStep(task.TaskId, step, ct);
-                
+
                 if (result.Success)
                 {
+                    _traceService?.CompleteStep(stepCorrId, stepLabel, true);
                     // Advance to next step
                     _taskService.UpdateStep(task.TaskId, task.CurrentStep + 1);
                     _totalStepsExecuted++;
@@ -304,11 +322,16 @@ public class TaskRunner
                 }
                 else if (result.RequiresApproval)
                 {
+                    _traceService?.CompleteStep(stepCorrId, stepLabel, true, FailureCode.None, "waiting_approval");
                     AddTrace("INFO", $"Step {task.CurrentStep + 1} waiting for approval", task.TaskId);
                     // State already set by ExecuteStep
                 }
                 else
                 {
+                    var fc = step.Action.StartsWith("browser.") ? FailureCode.BROWSER_STEP_FAILED
+                           : step.Action.StartsWith("http.")    ? FailureCode.HTTP_STEP_FAILED
+                           : FailureCode.STEP_EXECUTION_FAILED;
+                    _traceService?.CompleteStep(stepCorrId, stepLabel, false, fc, result.Error);
                     _taskService.Fail(task.TaskId, $"StepFailed: {step.Action} - {result.Error}");
                     AddTrace("ERROR", $"Step failed: {result.Error}", task.TaskId);
                 }
