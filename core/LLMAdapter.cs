@@ -1,7 +1,9 @@
-using System.Net.Http.Json;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Security.Cryptography;
+using LLama;
+using LLama.Common;
 
 namespace Archimedes.Core;
 
@@ -31,204 +33,247 @@ public class LLMHealthResult
     public string? Error { get; set; }
 }
 
-public class LLMAdapter
+public class LLMAdapter : IDisposable
 {
-    private readonly HttpClient _httpClient;
-    private readonly string _baseUrl;
-    private readonly string _model;
-    private readonly int _timeoutMs;
-    private bool _lastCheckAvailable;
-    
-    public LLMAdapter(HttpClient httpClient)
+    private LLamaWeights? _weights;
+    private ModelParams? _modelParams;
+    private readonly string _modelPath;
+    private readonly int _gpuLayers;
+    private readonly object _loadLock = new();
+    private bool _modelLoaded;
+
+    public LLMAdapter()
     {
-        _httpClient = httpClient;
-        _baseUrl = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "http://127.0.0.1:11434";
-        _model = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "llama3.2:3b";
-        _timeoutMs = 8000;
-        _httpClient.Timeout = TimeSpan.FromMilliseconds(_timeoutMs);
+        _modelPath = Environment.GetEnvironmentVariable("ARCHIMEDES_MODEL_PATH")
+            ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Archimedes", "models", "llama3.2-3b.gguf");
+
+        _gpuLayers = int.TryParse(
+            Environment.GetEnvironmentVariable("LLM_GPU_LAYERS"), out var g) ? g : 0;
     }
-    
-    public async Task<LLMHealthResult> HealthCheck()
+
+    // -----------------------------------------------------------------------
+    // Model lifecycle
+    // -----------------------------------------------------------------------
+
+    private bool EnsureModel()
     {
-        var result = new LLMHealthResult
+        if (_modelLoaded) return _weights != null;
+
+        lock (_loadLock)
         {
-            Runtime = "ollama",
-            Model = _model
-        };
-        
+            if (_modelLoaded) return _weights != null;
+            _modelLoaded = true;
+
+            if (!File.Exists(_modelPath))
+            {
+                ArchLogger.LogWarn($"[LLM] Model not found: {_modelPath}");
+                return false;
+            }
+
+            try
+            {
+                ArchLogger.LogInfo($"[LLM] Loading model: {Path.GetFileName(_modelPath)}");
+                _modelParams = new ModelParams(_modelPath)
+                {
+                    ContextSize = 2048,
+                    GpuLayerCount = _gpuLayers
+                };
+                _weights = LLamaWeights.LoadFromFile(_modelParams);
+                ArchLogger.LogInfo("[LLM] Model loaded via LLamaSharp");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ArchLogger.LogWarn($"[LLM] Model load failed: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        _weights?.Dispose();
+        _weights = null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Inference
+    // -----------------------------------------------------------------------
+
+    private async Task<string?> RunInference(string systemPrompt, string userContent, int maxTokens = 512)
+    {
+        if (_weights == null || _modelParams == null) return null;
+
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}/api/tags");
-            if (response.IsSuccessStatusCode)
+            var executor = new StatelessExecutor(_weights, _modelParams);
+
+            // Llama 3.2 Instruct chat format
+            var prompt =
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
+                systemPrompt +
+                "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n" +
+                userContent +
+                "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+
+            var inferParams = new InferenceParams
             {
-                result.Available = true;
-                _lastCheckAvailable = true;
-                ArchLogger.LogInfo($"LLM health check: available (model={_model})");
-            }
-            else
+                MaxTokens   = maxTokens,
+                Temperature = 0.1f,
+                AntiPrompts = new List<string>
+                {
+                    "<|eot_id|>",
+                    "<|end_of_text|>",
+                    "<|start_header_id|>"
+                }
+            };
+
+            var sb = new StringBuilder();
+            await foreach (var token in executor.InferAsync(prompt, inferParams))
             {
-                result.Available = false;
-                result.Error = $"Status: {response.StatusCode}";
-                _lastCheckAvailable = false;
+                sb.Append(token);
             }
+
+            return sb.ToString().Trim();
         }
         catch (Exception ex)
         {
-            result.Available = false;
-            result.Error = ex.Message;
-            _lastCheckAvailable = false;
-            ArchLogger.LogWarn($"LLM health check failed: {ex.Message}");
+            ArchLogger.LogWarn($"[LLM] Inference error: {ex.Message}");
+            return null;
         }
-        
-        return result;
     }
-    
+
+    // -----------------------------------------------------------------------
+    // Public API
+    // -----------------------------------------------------------------------
+
+    public Task<LLMHealthResult> HealthCheck()
+    {
+        var available = EnsureModel();
+        return Task.FromResult(new LLMHealthResult
+        {
+            Available = available,
+            Model     = Path.GetFileName(_modelPath),
+            Runtime   = "llamasharp",
+            Error     = available ? null : $"Model not found or failed to load: {_modelPath}"
+        });
+    }
+
     public async Task<InterpretResult> Interpret(string userPrompt)
     {
         var promptHash = HashString(userPrompt);
-        ArchLogger.LogInfo($"LLM interpret: prompt_hash={promptHash} len={userPrompt.Length}");
-        
+        ArchLogger.LogInfo($"[LLM] Interpret: hash={promptHash} len={userPrompt.Length}");
+
         var sanitized = SanitizeForLLM(userPrompt);
-        
+
+        if (!EnsureModel())
+            return HeuristicInterpret(userPrompt);
+
         try
         {
-            var systemPrompt = @"You are an intent parser. Given a user request, extract:
-- intent: one of TESTSITE_EXPORT, TESTSITE_MONITOR, WEB_LOGIN, DATA_EXTRACT, FILE_DOWNLOAD, UNKNOWN
-- slots: key-value pairs like {""url"": ""..."", ""username"": ""...""}
-- confidence: 0.0 to 1.0
-- clarificationQuestions: array of questions if intent unclear
+            const string systemPrompt =
+                "You are an intent parser. Given a user request, extract:\n" +
+                "- intent: one of TESTSITE_EXPORT, TESTSITE_MONITOR, WEB_LOGIN, DATA_EXTRACT, FILE_DOWNLOAD, UNKNOWN\n" +
+                "- slots: key-value pairs like {\"url\": \"...\", \"username\": \"...\"}\n" +
+                "- confidence: 0.0 to 1.0\n" +
+                "- clarificationQuestions: array of questions if intent unclear\n\n" +
+                "Respond ONLY with valid JSON matching this schema:\n" +
+                "{\"intent\": \"string\", \"slots\": {}, \"confidence\": 0.0, \"clarificationQuestions\": []}";
 
-Respond ONLY with valid JSON matching this schema:
-{""intent"": ""string"", ""slots"": {}, ""confidence"": 0.0, ""clarificationQuestions"": []}";
+            var raw = await RunInference(systemPrompt, sanitized, maxTokens: 256);
 
-            var response = await CallOllama(systemPrompt, sanitized);
-            
-            if (response != null)
+            if (!string.IsNullOrWhiteSpace(raw))
             {
-                var parsed = JsonSerializer.Deserialize<InterpretResult>(response, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                if (parsed != null && !string.IsNullOrEmpty(parsed.Intent))
+                var json = ExtractJson(raw);
+                if (json != null)
                 {
-                    ArchLogger.LogInfo($"LLM interpret result: intent={parsed.Intent} confidence={parsed.Confidence}");
-                    return parsed;
+                    var parsed = JsonSerializer.Deserialize<InterpretResult>(
+                        json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (parsed != null && !string.IsNullOrEmpty(parsed.Intent))
+                    {
+                        ArchLogger.LogInfo($"[LLM] Intent={parsed.Intent} confidence={parsed.Confidence}");
+                        return parsed;
+                    }
                 }
             }
         }
         catch (Exception ex)
         {
-            ArchLogger.LogWarn($"LLM interpret failed, using heuristic: {ex.Message}");
+            ArchLogger.LogWarn($"[LLM] Interpret failed, using heuristic: {ex.Message}");
         }
-        
+
         return HeuristicInterpret(userPrompt);
     }
-    
+
     public async Task<SummarizeResult> Summarize(string content)
     {
         var contentHash = HashString(content);
-        ArchLogger.LogInfo($"LLM summarize: content_hash={contentHash} len={content.Length}");
-        
+        ArchLogger.LogInfo($"[LLM] Summarize: hash={contentHash} len={content.Length}");
+
         var sanitized = SanitizeForLLM(content);
         var truncated = sanitized.Length > 2000 ? sanitized[..2000] + "..." : sanitized;
-        
+
+        if (!EnsureModel())
+            return HeuristicSummarize(content);
+
         try
         {
-            var systemPrompt = @"You are a summarizer. Given content, produce:
-- shortSummary: 1-2 sentence summary
-- bulletInsights: key points as array
-- risks: potential issues or concerns
-- nextQuestions: follow-up questions
+            const string systemPrompt =
+                "You are a summarizer. Given content, produce:\n" +
+                "- shortSummary: 1-2 sentence summary\n" +
+                "- bulletInsights: key points as array\n" +
+                "- risks: potential issues or concerns\n" +
+                "- nextQuestions: follow-up questions\n\n" +
+                "Respond ONLY with valid JSON:\n" +
+                "{\"shortSummary\": \"...\", \"bulletInsights\": [], \"risks\": [], \"nextQuestions\": []}";
 
-Respond ONLY with valid JSON:
-{""shortSummary"": ""..."", ""bulletInsights"": [], ""risks"": [], ""nextQuestions"": []}";
+            var raw = await RunInference(systemPrompt, truncated, maxTokens: 512);
 
-            var response = await CallOllama(systemPrompt, truncated);
-            
-            if (response != null)
+            if (!string.IsNullOrWhiteSpace(raw))
             {
-                var parsed = JsonSerializer.Deserialize<SummarizeResult>(response, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                if (parsed != null && !string.IsNullOrEmpty(parsed.ShortSummary))
+                var json = ExtractJson(raw);
+                if (json != null)
                 {
-                    ArchLogger.LogInfo($"LLM summarize result: summary_len={parsed.ShortSummary.Length}");
-                    return parsed;
+                    var parsed = JsonSerializer.Deserialize<SummarizeResult>(
+                        json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (parsed != null && !string.IsNullOrEmpty(parsed.ShortSummary))
+                    {
+                        ArchLogger.LogInfo($"[LLM] Summary len={parsed.ShortSummary.Length}");
+                        return parsed;
+                    }
                 }
             }
         }
         catch (Exception ex)
         {
-            ArchLogger.LogWarn($"LLM summarize failed, using heuristic: {ex.Message}");
+            ArchLogger.LogWarn($"[LLM] Summarize failed, using heuristic: {ex.Message}");
         }
-        
+
         return HeuristicSummarize(content);
     }
-    
-    private async Task<string?> CallOllama(string systemPrompt, string userContent)
-    {
-        var request = new
-        {
-            model = _model,
-            messages = new[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = userContent }
-            },
-            stream = false,
-            format = "json"
-        };
-        
-        using var cts = new CancellationTokenSource(_timeoutMs);
-        
-        try
-        {
-            var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/chat", request, cts.Token);
-            
-            if (!response.IsSuccessStatusCode)
-            {
-                return null;
-            }
-            
-            var responseBody = await response.Content.ReadAsStringAsync();
-            var json = JsonDocument.Parse(responseBody);
-            
-            if (json.RootElement.TryGetProperty("message", out var msg) &&
-                msg.TryGetProperty("content", out var content))
-            {
-                return content.GetString();
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            ArchLogger.LogWarn("LLM request timed out");
-        }
-        catch (Exception ex)
-        {
-            ArchLogger.LogWarn($"LLM request failed: {ex.Message}");
-        }
-        
-        return null;
-    }
-    
+
+    // -----------------------------------------------------------------------
+    // Heuristic fallbacks (always available even without model)
+    // -----------------------------------------------------------------------
+
     private static InterpretResult HeuristicInterpret(string prompt)
     {
-        var lower = prompt.ToLowerInvariant();
-        var result = new InterpretResult
-        {
-            IsHeuristicFallback = true,
-            Confidence = 0.6
-        };
-        
+        var lower  = prompt.ToLowerInvariant();
+        var result = new InterpretResult { IsHeuristicFallback = true, Confidence = 0.6 };
+
         if (lower.Contains("testsite") && (lower.Contains("download") || lower.Contains("csv") || lower.Contains("export")))
         {
-            result.Intent = "TESTSITE_EXPORT";
-            result.Confidence = 0.8;
+            result.Intent = "TESTSITE_EXPORT"; result.Confidence = 0.8;
         }
         else if (lower.Contains("testsite") && (lower.Contains("monitor") || lower.Contains("watch") || lower.Contains("poll")))
         {
-            result.Intent = "TESTSITE_MONITOR";
-            result.Confidence = 0.8;
+            result.Intent = "TESTSITE_MONITOR"; result.Confidence = 0.8;
         }
         else if (lower.Contains("login"))
         {
-            result.Intent = "WEB_LOGIN";
-            result.Slots["action"] = "login";
+            result.Intent = "WEB_LOGIN"; result.Slots["action"] = "login";
         }
         else if (lower.Contains("download"))
         {
@@ -240,48 +285,52 @@ Respond ONLY with valid JSON:
         }
         else
         {
-            result.Intent = "UNKNOWN";
-            result.Confidence = 0.3;
+            result.Intent = "UNKNOWN"; result.Confidence = 0.3;
             result.ClarificationQuestions.Add("What specific action would you like me to perform?");
         }
-        
-        ArchLogger.LogInfo($"Heuristic interpret: intent={result.Intent}");
+
+        ArchLogger.LogInfo($"[LLM] Heuristic intent={result.Intent}");
         return result;
     }
-    
+
     private static SummarizeResult HeuristicSummarize(string content)
     {
-        var result = new SummarizeResult
-        {
-            IsHeuristicFallback = true
-        };
-        
+        var result    = new SummarizeResult { IsHeuristicFallback = true };
         var sentences = content.Split(new[] { '.', '!', '?' }, StringSplitOptions.RemoveEmptyEntries);
-        if (sentences.Length > 0)
-        {
-            result.ShortSummary = sentences[0].Trim() + ".";
-        }
-        else
-        {
-            result.ShortSummary = content.Length > 100 ? content[..100] + "..." : content;
-        }
-        
+        result.ShortSummary = sentences.Length > 0
+            ? sentences[0].Trim() + "."
+            : (content.Length > 100 ? content[..100] + "..." : content);
+
         var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         result.BulletInsights = lines.Take(5).Select(l => l.Trim()).Where(l => l.Length > 10).ToList();
-        
         result.NextQuestions.Add("Would you like more details?");
-        
-        ArchLogger.LogInfo($"Heuristic summarize: summary_len={result.ShortSummary.Length}");
+
+        ArchLogger.LogInfo($"[LLM] Heuristic summary len={result.ShortSummary.Length}");
         return result;
     }
-    
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>Extracts JSON object from a string that may contain markdown or extra text.</summary>
+    private static string? ExtractJson(string raw)
+    {
+        var start = raw.IndexOf('{');
+        var end   = raw.LastIndexOf('}');
+        if (start < 0 || end < 0 || end <= start) return null;
+        return raw[start..(end + 1)];
+    }
+
     private static string SanitizeForLLM(string input)
     {
-        input = System.Text.RegularExpressions.Regex.Replace(input, @"(password|passwd|pwd|secret|token|bearer|jwt|api[-_]?key|auth[-_]?token|session[-_]?id|cookie)[\s:=]+\S+", "$1=[REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        input = System.Text.RegularExpressions.Regex.Replace(input, @"[a-zA-Z0-9+/]{40,}", "[LONG_TOKEN_REDACTED]");
+        input = Regex.Replace(input,
+            @"(password|passwd|pwd|secret|token|bearer|jwt|api[-_]?key|auth[-_]?token|session[-_]?id|cookie)[\s:=]+\S+",
+            "$1=[REDACTED]", RegexOptions.IgnoreCase);
+        input = Regex.Replace(input, @"[a-zA-Z0-9+/]{40,}", "[LONG_TOKEN_REDACTED]");
         return input;
     }
-    
+
     private static string HashString(string input)
     {
         using var sha = SHA256.Create();

@@ -29,7 +29,7 @@ var deviceKeyManager = new DeviceKeyManager();
 var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
-var llmAdapter = new LLMAdapter(httpClientFactory.CreateClient());
+var llmAdapter = new LLMAdapter();
 var planner = new Planner(llmAdapter, policyEngine);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
@@ -1170,4 +1170,5 @@ app.MapPost("/store/test", async (HttpRequest req) =>
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
+app.Lifetime.ApplicationStopping.Register(() => llmAdapter.Dispose());
 app.Run();
