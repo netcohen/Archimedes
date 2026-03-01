@@ -2,6 +2,7 @@ namespace Archimedes.Core;
 
 /// <summary>
 /// A single step within an execution trace.
+/// Phase 20: Outcome and Evidence fields added for Success Criteria results.
 /// </summary>
 public class TraceStep
 {
@@ -13,6 +14,10 @@ public class TraceStep
     public bool   Success        { get; set; }
     public FailureCode FailureCode { get; set; } = FailureCode.None;
     public string? Details       { get; set; }
+
+    // Phase 20: Success Criteria outcome
+    public string? Outcome  { get; set; }   // OutcomeResult as string
+    public string? Evidence { get; set; }   // What was found to support the outcome
 }
 
 /// <summary>

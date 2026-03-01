@@ -47,7 +47,10 @@ var storageManager = new StorageManager(storageConfig);
 // Phase 19: Observability — TraceService (singleton, no DI needed)
 var traceService = new TraceService();
 
-var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager, traceService);
+// Phase 20: Success Criteria Engine
+var criteriaEngine = new SuccessCriteriaEngine();
+
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager, traceService, criteriaEngine);
 taskRunner.Start();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
@@ -703,8 +706,84 @@ app.MapGet("/traces/{correlationId}", (string correlationId) =>
             s.DurationMs,
             s.Success,
             failureCode = s.FailureCode.ToString(),
-            s.Details
+            s.Details,
+            s.Outcome,    // Phase 20
+            s.Evidence    // Phase 20
         })
+    });
+});
+
+// ── Phase 20: Success Criteria Engine ────────────────────────────────────────
+
+// Standalone verification — test a step result against criteria
+app.MapPost("/criteria/verify", async (HttpRequest req) =>
+{
+    using var r    = new StreamReader(req.Body);
+    var body       = await r.ReadToEndAsync();
+    var request    = JsonSerializer.Deserialize<CriteriaVerifyRequest>(body);
+    if (request == null || string.IsNullOrWhiteSpace(request.Action))
+        return Results.BadRequest(new { error = "action required" });
+
+    var step   = new PlanStep { Action = request.Action, Index = 0 };
+    var result = new StepExecutionResult { Success = request.StepSuccess, Data = request.Data };
+    var vr     = criteriaEngine.Verify(step, result);
+
+    return Results.Json(new
+    {
+        action           = request.Action,
+        outcome          = vr.Outcome.ToString(),
+        vr.Evidence,
+        vr.ExpectedCriteria,
+        vr.FailureReason
+    });
+});
+
+// Get the full outcome for a completed task (reads from task trace)
+app.MapGet("/task/{id}/outcome", (string id) =>
+{
+    var task = taskService.GetTask(id);
+    if (task == null)
+        return Results.NotFound(new { error = "Task not found" });
+
+    var trace = traceService.Get($"task_{id}");
+    if (trace == null)
+        return Results.Json(new
+        {
+            taskId         = id,
+            state          = task.State.ToString(),
+            overallOutcome = "NO_TRACE",
+            stepCount      = 0,
+            steps          = Array.Empty<object>()
+        });
+
+    var stepOutcomes = trace.Steps
+        .Where(s => s.Name.StartsWith("Step"))
+        .Select(s => new
+        {
+            s.Name,
+            s.Success,
+            outcome  = s.Outcome ?? "NOT_APPLICABLE",
+            evidence = s.Evidence,
+            s.DurationMs
+        })
+        .ToList();
+
+    // Overall outcome: VERIFIED if all steps verified/unverified, FAILED_VERIFY if any failed
+    var overallOutcome = stepOutcomes.Any(s => s.outcome == "FAILED_VERIFY")
+        ? "FAILED_VERIFY"
+        : stepOutcomes.Any(s => s.outcome == "PARTIAL")
+        ? "PARTIAL"
+        : stepOutcomes.Any(s => s.outcome == "VERIFIED")
+        ? "VERIFIED"
+        : "UNVERIFIED";
+
+    return Results.Json(new
+    {
+        taskId         = id,
+        state          = task.State.ToString(),
+        overallOutcome,
+        stepCount      = stepOutcomes.Count,
+        steps          = stepOutcomes
     });
 });
 

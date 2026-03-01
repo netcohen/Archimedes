@@ -36,21 +36,24 @@ public class TaskRunner
     private readonly ConcurrentQueue<TraceLogEntry> _traceLogs = new();
     private const int MaxTraceLogs = 500;
     
-    private readonly StorageManager? _storageManager;
-    private readonly TraceService?   _traceService;   // Phase 19: Observability
+    private readonly StorageManager?        _storageManager;
+    private readonly TraceService?          _traceService;        // Phase 19: Observability
+    private readonly SuccessCriteriaEngine? _criteriaEngine;      // Phase 20: Success Criteria
 
     // Separate client for browser calls — longer timeout (Playwright can be slow)
     private readonly HttpClient _browserHttpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
     private readonly string _netBaseUrl;
 
     public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient,
-        StorageManager? storageManager = null, TraceService? traceService = null)
+        StorageManager? storageManager = null, TraceService? traceService = null,
+        SuccessCriteriaEngine? criteriaEngine = null)
     {
-        _taskService    = taskService;
-        _planner        = planner;
-        _httpClient     = httpClient;
-        _storageManager = storageManager;
-        _traceService   = traceService;
+        _taskService     = taskService;
+        _planner         = planner;
+        _httpClient      = httpClient;
+        _storageManager  = storageManager;
+        _traceService    = traceService;
+        _criteriaEngine  = criteriaEngine;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
         _netBaseUrl = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
     }
@@ -241,109 +244,133 @@ public class TaskRunner
         {
             return; // Already being processed
         }
-        
+
+        // Phase 19+20: open a task-level trace (synthetic correlation ID)
+        var taskCorrId = $"task_{task.TaskId}";
+        _traceService?.Begin(taskCorrId, $"/task/{task.TaskId}/run", "BACKGROUND", task.TaskId);
+
+        bool taskSucceeded = false;
+
         try
         {
             AddTrace("INFO", $"Processing task", task.TaskId);
-            
+
             // Step 1: Ensure plan exists
             var plan = _taskService.GetPlan(task.TaskId);
             if (plan == null || string.IsNullOrEmpty(task.PlanHash))
             {
                 AddTrace("INFO", "Generating plan", task.TaskId);
-                
+
                 var prompt = _taskService.GetUserPrompt(task.TaskId);
                 if (string.IsNullOrEmpty(prompt))
                 {
+                    _traceService?.CompleteStep(taskCorrId, "TaskRunner.Plan", false,
+                        FailureCode.MISSING_PROMPT, "No prompt on task");
                     _taskService.Fail(task.TaskId, "MissingPrompt: Cannot generate plan without prompt");
                     AddTrace("ERROR", "Missing prompt", task.TaskId);
                     return;
                 }
-                
-                // Phase 19: trace planning step
-                var planCorrId = $"task_{task.TaskId}";
-                _traceService?.BeginStep(planCorrId, "TaskRunner.Plan");
+
+                _traceService?.BeginStep(taskCorrId, "TaskRunner.Plan");
 
                 var planResult = await _planner.PlanTask(task.TaskId, prompt);
                 if (!planResult.Success || planResult.Plan == null)
                 {
-                    _traceService?.CompleteStep(planCorrId, "TaskRunner.Plan", false,
+                    _traceService?.CompleteStep(taskCorrId, "TaskRunner.Plan", false,
                         FailureCode.PLAN_GENERATION_FAILED, planResult.Error);
                     _taskService.Fail(task.TaskId, $"PlanningFailed: {planResult.Error}");
                     AddTrace("ERROR", $"Planning failed: {planResult.Error}", task.TaskId);
                     return;
                 }
 
-                _traceService?.CompleteStep(planCorrId, "TaskRunner.Plan", true, FailureCode.None,
+                _traceService?.CompleteStep(taskCorrId, "TaskRunner.Plan", true, FailureCode.None,
                     $"intent={planResult.Intent} steps={planResult.Plan.Steps.Count}");
-                
+
                 // Persist plan
                 _taskService.SetPlan(task.TaskId, new TaskPlanRequest
                 {
                     Intent = planResult.Plan.Intent,
                     Steps = planResult.Plan.Steps
                 });
-                
+
                 plan = planResult.Plan;
                 AddTrace("INFO", $"Plan created: {plan.Steps.Count} steps, hash={plan.Hash}", task.TaskId);
-                
+
                 // Refresh task state
                 task = _taskService.GetTask(task.TaskId)!;
             }
-            
+
             // Step 2: Check if we need approval
             if (RequiresApproval(plan, task.CurrentStep))
             {
                 AddTrace("INFO", $"Step {task.CurrentStep} requires approval", task.TaskId);
-                // Approval would be set by step execution
                 return;
             }
-            
+
             // Step 3: Execute current step
             if (task.CurrentStep < plan.Steps.Count)
             {
-                var step = plan.Steps[task.CurrentStep];
+                var step      = plan.Steps[task.CurrentStep];
+                var stepLabel = $"Step{task.CurrentStep + 1}.{step.Action}";
                 AddTrace("INFO", $"Executing step {task.CurrentStep + 1}/{plan.Steps.Count}: {step.Action}", task.TaskId);
-                
-                // Phase 19: trace step execution
-                var stepCorrId = $"task_{task.TaskId}";
-                var stepLabel  = $"Step{task.CurrentStep + 1}.{step.Action}";
-                _traceService?.BeginStep(stepCorrId, stepLabel);
+
+                _traceService?.BeginStep(taskCorrId, stepLabel);
 
                 var result = await ExecuteStep(task.TaskId, step, ct);
 
+                // Phase 20: verify outcome against success criteria
+                var vr = _criteriaEngine?.Verify(step, result)
+                      ?? new VerificationResult { Outcome = OutcomeResult.NOT_APPLICABLE };
+
+                var outcomeStr  = vr.Outcome.ToString();
+                var evidenceStr = vr.Evidence ?? vr.FailureReason;
+
                 if (result.Success)
                 {
-                    _traceService?.CompleteStep(stepCorrId, stepLabel, true);
-                    // Advance to next step
+                    var fc = vr.Outcome == OutcomeResult.FAILED_VERIFY
+                        ? FailureCode.STEP_EXECUTION_FAILED
+                        : FailureCode.None;
+
+                    _traceService?.CompleteStep(taskCorrId, stepLabel,
+                        success:  vr.Outcome != OutcomeResult.FAILED_VERIFY,
+                        code:     fc,
+                        details:  $"outcome={outcomeStr}",
+                        outcome:  outcomeStr,
+                        evidence: evidenceStr);
+
                     _taskService.UpdateStep(task.TaskId, task.CurrentStep + 1);
                     _totalStepsExecuted++;
-                    AddTrace("INFO", $"Step {task.CurrentStep + 1} completed", task.TaskId);
+                    AddTrace("INFO", $"Step {task.CurrentStep + 1} completed (outcome={outcomeStr})", task.TaskId);
                 }
                 else if (result.RequiresApproval)
                 {
-                    _traceService?.CompleteStep(stepCorrId, stepLabel, true, FailureCode.None, "waiting_approval");
+                    _traceService?.CompleteStep(taskCorrId, stepLabel, true,
+                        details: "waiting_approval", outcome: "NOT_APPLICABLE");
                     AddTrace("INFO", $"Step {task.CurrentStep + 1} waiting for approval", task.TaskId);
-                    // State already set by ExecuteStep
                 }
                 else
                 {
                     var fc = step.Action.StartsWith("browser.") ? FailureCode.BROWSER_STEP_FAILED
                            : step.Action.StartsWith("http.")    ? FailureCode.HTTP_STEP_FAILED
                            : FailureCode.STEP_EXECUTION_FAILED;
-                    _traceService?.CompleteStep(stepCorrId, stepLabel, false, fc, result.Error);
+
+                    _traceService?.CompleteStep(taskCorrId, stepLabel, false, fc,
+                        details:  result.Error,
+                        outcome:  OutcomeResult.FAILED_VERIFY.ToString(),
+                        evidence: result.Error);
+
                     _taskService.Fail(task.TaskId, $"StepFailed: {step.Action} - {result.Error}");
                     AddTrace("ERROR", $"Step failed: {result.Error}", task.TaskId);
                 }
             }
-            
+
             // Step 4: Check if done
             task = _taskService.GetTask(task.TaskId)!;
             if (task.State == TaskState.RUNNING && task.CurrentStep >= plan.Steps.Count)
             {
-                // Generate summary
                 var summary = GenerateSummary(task.TaskId, plan);
                 _taskService.Complete(task.TaskId, summary);
+                taskSucceeded = true;
                 AddTrace("INFO", "Task completed", task.TaskId);
             }
         }
@@ -355,6 +382,7 @@ public class TaskRunner
         finally
         {
             _executingTasks.TryRemove(task.TaskId, out _);
+            _traceService?.Complete(taskCorrId, taskSucceeded);
         }
     }
     

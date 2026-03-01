@@ -70,11 +70,13 @@ public class TraceService
 
     /// <summary>Mark a named step as completed.</summary>
     public void CompleteStep(
-        string correlationId,
-        string stepName,
-        bool success,
-        FailureCode code    = FailureCode.None,
-        string?    details  = null)
+        string      correlationId,
+        string      stepName,
+        bool        success,
+        FailureCode code     = FailureCode.None,
+        string?     details  = null,
+        string?     outcome  = null,   // Phase 20: OutcomeResult as string
+        string?     evidence = null)   // Phase 20: verification evidence
     {
         if (!_active.TryGetValue(correlationId, out var trace)) return;
 
@@ -90,6 +92,8 @@ public class TraceService
         step.Success        = success;
         step.FailureCode    = code;
         step.Details        = details;
+        step.Outcome        = outcome;
+        step.Evidence       = evidence;
     }
 
     /// <summary>Finalize the trace and persist it to disk.</summary>
