@@ -274,23 +274,32 @@ if ($concurrentTasks.Count -eq 3) {
     Write-Host "  PASS: Created 3 concurrent tasks" -ForegroundColor Green
     $passed++
     
-    # Wait for all to complete
-    Start-Sleep -Seconds 15
-    
-    $allDone = $true
-    foreach ($tid in $concurrentTasks) {
-        $check = Invoke-RestMethod -Uri "$coreUrl/task/$tid" -Method GET
-        if ($check.state -ne "DONE") {
-            $allDone = $false
-            Write-Host "    - Task ${tid}: $($check.state)" -ForegroundColor Yellow
+    # Wait for all to complete — poll up to 60s to handle task backlog
+    $deadline = (Get-Date).AddSeconds(60)
+    $allDone = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $allDone = $true
+        foreach ($tid in $concurrentTasks) {
+            $check = Invoke-RestMethod -Uri "$coreUrl/task/$tid" -Method GET
+            if ($check.state -ne "DONE") {
+                $allDone = $false
+            }
         }
+        if ($allDone) { break }
     }
-    
+
     if ($allDone) {
         Write-Host "  PASS: All concurrent tasks completed" -ForegroundColor Green
         $passed++
     } else {
-        Write-Host "  FAIL: Not all tasks completed" -ForegroundColor Red
+        foreach ($tid in $concurrentTasks) {
+            $check = Invoke-RestMethod -Uri "$coreUrl/task/$tid" -Method GET
+            if ($check.state -ne "DONE") {
+                Write-Host "    - Task ${tid}: $($check.state)" -ForegroundColor Yellow
+            }
+        }
+        Write-Host "  FAIL: Not all tasks completed within 60s" -ForegroundColor Red
         $failed++
     }
 }
