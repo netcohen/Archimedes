@@ -5,6 +5,7 @@ namespace Archimedes.Core;
 
 /// <summary>
 /// Manages promotion, canary routing, and rollback. Tracks versions and SLOs.
+/// Phase 16: atomic state writes, idempotency (PROMOTE_NOOP), retention cleanup.
 /// </summary>
 public class PromotionManager
 {
@@ -14,6 +15,8 @@ public class PromotionManager
     private string? _canaryVersion;
     private readonly ConcurrentQueue<RuntimeMetric> _metrics = new();
     private const int MaxMetrics = 500;
+    private const int KeepLastCandidates = 5;
+    private readonly object _promoteLock = new();
 
     public PromotionManager(string releasesRoot, SelfUpdateAudit audit)
     {
@@ -37,74 +40,99 @@ public class PromotionManager
         };
     }
 
-    public bool Promote(string candidateId, string sandboxPath, double? canaryPercent = null)
+    /// <summary>
+    /// Promotes a candidate. Returns PromoteResult (Success / Noop / Failed).
+    /// Thread-safe. Idempotent: promoting the same candidateId twice returns Noop.
+    /// </summary>
+    public PromoteResult Promote(string candidateId, string sandboxPath, double? canaryPercent = null)
     {
-        try
+        lock (_promoteLock)
         {
-            var prev = _currentVersion;
-            AppendToHistory(candidateId);
-            var versionDir = Path.Combine(_releasesRoot, candidateId);
-            var sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Release", "net8.0");
-            if (!Directory.Exists(sandboxCore))
-                sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Debug", "net8.0");
-            if (!Directory.Exists(sandboxCore))
+            // Idempotency: already on this version
+            if (_currentVersion == candidateId)
             {
-                _audit.Log("promote", candidateId, "Candidate build not found", false);
-                return false;
+                _audit.Log("promote", candidateId, "PROMOTE_NOOP: already current version", true);
+                return PromoteResult.Noop;
             }
 
-            CopyDirectory(sandboxCore, versionDir);
-            var previous = _currentVersion;
-            _currentVersion = candidateId;
-            if (canaryPercent.HasValue && canaryPercent > 0)
-                _canaryVersion = candidateId;
-            else
-                _canaryVersion = null;
-            SaveState(previous);
-            _audit.Log("promote", candidateId, $"Promoted from {prev ?? "none"}", true);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _audit.Log("promote", candidateId, ex.Message, false);
-            return false;
+            try
+            {
+                var sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Release", "net8.0");
+                if (!Directory.Exists(sandboxCore))
+                    sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Debug", "net8.0");
+                if (!Directory.Exists(sandboxCore))
+                {
+                    _audit.Log("promote", candidateId, "Candidate build not found", false);
+                    return PromoteResult.Failed;
+                }
+
+                var prev = _currentVersion;
+                var versionDir = Path.Combine(_releasesRoot, candidateId);
+                CopyDirectory(sandboxCore, versionDir);
+                AppendToHistory(candidateId);
+
+                _currentVersion = candidateId;
+                _canaryVersion = (canaryPercent.HasValue && canaryPercent > 0) ? candidateId : null;
+
+                SaveStateAtomic(previousVersion: prev);
+                _audit.Log("promote", candidateId, $"PROMOTE_SUCCESS from {prev ?? "none"}", true);
+
+                CleanupOldCandidates();
+                return PromoteResult.Success;
+            }
+            catch (Exception ex)
+            {
+                _audit.Log("promote", candidateId, ex.Message, false);
+                return PromoteResult.Failed;
+            }
         }
     }
 
-    public bool Rollback()
+    /// <summary>
+    /// Rolls back to previous version. Returns RollbackResult.
+    /// Idempotent: rolling back when nothing exists returns NothingToRollback.
+    /// </summary>
+    public RollbackResult Rollback()
     {
-        var statePath = Path.Combine(_releasesRoot, "state.json");
-        if (!File.Exists(statePath))
+        lock (_promoteLock)
         {
-            _audit.Log("rollback", null, "No state to rollback", false);
-            return false;
-        }
-        try
-        {
-            var json = File.ReadAllText(statePath);
-            var state = JsonSerializer.Deserialize<PromotionState>(json);
-            if (state?.PreviousVersion == null)
+            var statePath = Path.Combine(_releasesRoot, "state.json");
+            if (!File.Exists(statePath))
             {
-                _audit.Log("rollback", null, "No previous version", false);
-                return false;
+                _audit.Log("rollback", null, "No state file — nothing to rollback", false);
+                return RollbackResult.NothingToRollback;
             }
-            var prevDir = Path.Combine(_releasesRoot, state.PreviousVersion);
-            if (!Directory.Exists(prevDir))
+
+            try
             {
-                _audit.Log("rollback", state.PreviousVersion, "Previous build missing", false);
-                return false;
+                var json = File.ReadAllText(statePath);
+                var state = JsonSerializer.Deserialize<PromotionState>(json);
+                if (state?.PreviousVersion == null)
+                {
+                    _audit.Log("rollback", null, "No previous version — nothing to rollback", false);
+                    return RollbackResult.NothingToRollback;
+                }
+
+                var prevDir = Path.Combine(_releasesRoot, state.PreviousVersion);
+                if (!Directory.Exists(prevDir))
+                {
+                    _audit.Log("rollback", state.PreviousVersion, "Previous build directory missing", false);
+                    return RollbackResult.Failed;
+                }
+
+                var oldCurrent = _currentVersion;
+                _currentVersion = state.PreviousVersion;
+                _canaryVersion = null;
+                // After rollback: explicitly no further previous — skip history lookup to prevent double-rollback
+                SaveStateAtomic(previousVersion: null, skipHistoryLookup: true);
+                _audit.Log("rollback", _currentVersion, $"ROLLBACK_SUCCESS from {oldCurrent ?? "none"}", true);
+                return RollbackResult.Success;
             }
-            var oldCurrent = _currentVersion;
-            _currentVersion = state.PreviousVersion;
-            _canaryVersion = null;
-            SaveState(previousVersion: oldCurrent);
-            _audit.Log("rollback", _currentVersion, $"Rolled back from {state.CurrentVersion}", true);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _audit.Log("rollback", null, ex.Message, false);
-            return false;
+            catch (Exception ex)
+            {
+                _audit.Log("rollback", null, ex.Message, false);
+                return RollbackResult.Failed;
+            }
         }
     }
 
@@ -114,6 +142,8 @@ public class PromotionManager
         while (_metrics.Count > MaxMetrics)
             _metrics.TryDequeue(out _);
     }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
 
     private void LoadState()
     {
@@ -132,16 +162,79 @@ public class PromotionManager
         catch { }
     }
 
-    private void SaveState(string? previousVersion = null)
+    /// <summary>
+    /// Atomic state write: write to .tmp then File.Replace — no corrupt state on crash.
+    /// skipHistoryLookup=true forces PreviousVersion=null (used after rollback to prevent double-rollback).
+    /// </summary>
+    private void SaveStateAtomic(string? previousVersion = null, bool skipHistoryLookup = false)
     {
         var statePath = Path.Combine(_releasesRoot, "state.json");
+        var tmpPath   = statePath + ".tmp";
+        var backupPath = statePath + ".bak";
+
         var state = new PromotionState
         {
-            CurrentVersion = _currentVersion,
-            CanaryVersion = _canaryVersion,
-            PreviousVersion = previousVersion ?? GetPreviousFromHistory()
+            CurrentVersion  = _currentVersion,
+            CanaryVersion   = _canaryVersion,
+            PreviousVersion = skipHistoryLookup ? previousVersion : (previousVersion ?? GetPreviousFromHistory())
         };
-        File.WriteAllText(statePath, JsonSerializer.Serialize(state));
+
+        var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(tmpPath, json);
+
+        if (File.Exists(statePath))
+            File.Replace(tmpPath, statePath, backupPath);
+        else
+            File.Move(tmpPath, statePath);
+    }
+
+    /// <summary>
+    /// Removes old candidate directories, keeping the most recent KeepLastCandidates.
+    /// Never deletes current or previous version directories.
+    /// </summary>
+    private void CleanupOldCandidates()
+    {
+        try
+        {
+            // Reload state to get accurate previousVersion after SaveStateAtomic
+            string? previousVersion = null;
+            var statePath = Path.Combine(_releasesRoot, "state.json");
+            if (File.Exists(statePath))
+            {
+                var state = JsonSerializer.Deserialize<PromotionState>(File.ReadAllText(statePath));
+                previousVersion = state?.PreviousVersion;
+            }
+
+            var protected_ = new HashSet<string?> { _currentVersion, previousVersion, _canaryVersion }
+                .Where(v => v != null).Cast<string>().ToHashSet();
+
+            var candidateDirs = Directory.GetDirectories(_releasesRoot)
+                .Select(d => new DirectoryInfo(d))
+                .Where(d => !protected_.Contains(d.Name))
+                .OrderBy(d => d.CreationTimeUtc)
+                .ToList();
+
+            var allowedUnprotected = Math.Max(0, KeepLastCandidates - protected_.Count);
+            var toDelete = candidateDirs.Count - allowedUnprotected;
+            if (toDelete <= 0) return;
+
+            foreach (var dir in candidateDirs.Take(toDelete))
+            {
+                try
+                {
+                    Directory.Delete(dir.FullName, recursive: true);
+                    _audit.Log("cleanup", dir.Name, "CLEANUP: removed old candidate", true);
+                }
+                catch (Exception ex)
+                {
+                    _audit.Log("cleanup", dir.Name, $"CLEANUP_FAILED: {ex.Message}", false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _audit.Log("cleanup", null, $"CLEANUP_FAILED: {ex.Message}", false);
+        }
     }
 
     private void AppendToHistory(string version)
@@ -186,26 +279,33 @@ public class PromotionManager
     }
 }
 
+// ── Result enums ─────────────────────────────────────────────────────────────
+
+public enum PromoteResult  { Success, Noop, Failed }
+public enum RollbackResult { Success, NothingToRollback, Failed }
+
+// ── Data models ──────────────────────────────────────────────────────────────
+
 public class PromotionStatus
 {
     public string? CurrentVersion { get; set; }
-    public string? CanaryVersion { get; set; }
-    public string ReleasesRoot { get; set; } = "";
+    public string? CanaryVersion  { get; set; }
+    public string  ReleasesRoot   { get; set; } = "";
     public List<RuntimeMetric> RecentMetrics { get; set; } = new();
 }
 
 public class PromotionState
 {
-    public string? CurrentVersion { get; set; }
-    public string? CanaryVersion { get; set; }
+    public string? CurrentVersion  { get; set; }
+    public string? CanaryVersion   { get; set; }
     public string? PreviousVersion { get; set; }
 }
 
 public class RuntimeMetric
 {
-    public DateTime Timestamp { get; set; }
-    public string? Version { get; set; }
-    public bool Healthy { get; set; }
-    public double LatencyMs { get; set; }
-    public int ErrorCount { get; set; }
+    public DateTime Timestamp  { get; set; }
+    public string?  Version    { get; set; }
+    public bool     Healthy    { get; set; }
+    public double   LatencyMs  { get; set; }
+    public int      ErrorCount { get; set; }
 }

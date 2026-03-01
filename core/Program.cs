@@ -47,7 +47,7 @@ var storageManager = new StorageManager(storageConfig);
 var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager);
 taskRunner.Start();
 
-var selfUpdateAudit = new SelfUpdateAudit();
+var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
 var sandboxRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_SANDBOX_ROOT");
 if (string.IsNullOrWhiteSpace(sandboxRoot))
     sandboxRoot = Path.Combine(Path.GetTempPath(), "ArchimedesSandbox");
@@ -732,14 +732,24 @@ app.MapPost("/selfupdate/promote", async (HttpRequest req) =>
         sandboxCore = Path.Combine(sandboxPath, "core", "bin", "Debug", "net8.0");
     if (!Directory.Exists(sandboxCore))
         return Results.NotFound("Candidate build not found");
-    var ok = promotionManager.Promote(candidateId, sandboxPath, canaryPercent);
-    return Results.Json(new { ok });
+    var promoteResult = promotionManager.Promote(candidateId, sandboxPath, canaryPercent);
+    return promoteResult switch
+    {
+        PromoteResult.Success => Results.Json(new { ok = true,  noop = false }),
+        PromoteResult.Noop    => Results.Json(new { ok = true,  noop = true  }),
+        _                     => Results.Json(new { ok = false, noop = false })
+    };
 });
 
 app.MapPost("/selfupdate/rollback", () =>
 {
-    var ok = promotionManager.Rollback();
-    return Results.Json(new { ok });
+    var rollbackResult = promotionManager.Rollback();
+    return rollbackResult switch
+    {
+        RollbackResult.Success           => Results.Json(new { ok = true }),
+        RollbackResult.NothingToRollback => Results.Conflict(new { ok = false, error = "nothing to rollback" }),
+        _                                => Results.Json(new { ok = false, error = "rollback failed" })
+    };
 });
 
 app.MapGet("/selfupdate/audit", (int? skip, int? take) =>

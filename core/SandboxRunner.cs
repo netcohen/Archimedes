@@ -26,7 +26,7 @@ public class SandboxRunner
         _sandboxNetPort = sandboxNetPort;
     }
 
-    public SandboxRunResult Run(string commitOrRef, int soakHours = 0, bool dryRun = false)
+    public SandboxRunResult Run(string commitOrRef, int soakHours = 0, bool dryRun = false, bool buildOnly = false)
     {
         var runId = $"sb-{DateTime.UtcNow:yyyyMMddHHmmss}";
         var sandboxDir = Path.Combine(_sandboxRoot, runId);
@@ -50,7 +50,7 @@ public class SandboxRunner
                 CreatedAt = DateTime.UtcNow
             };
 
-            var (built, buildErrorDetails) = BuildInSandbox(sandboxDir, buildLogPath, skipNetBuild: dryRun);
+            var (built, buildErrorDetails) = BuildInSandbox(sandboxDir, buildLogPath, skipNetBuild: dryRun && !buildOnly);
             if (!built)
             {
                 _audit.Log("sandbox-run", runId, $"Build failed (sandboxPath={sandboxPath})", false);
@@ -65,12 +65,12 @@ public class SandboxRunner
                 };
             }
 
-            if (dryRun)
+            if (dryRun || buildOnly)
             {
-                manifest.GatePassed = true;
-                manifest.TestResultsSummary = "DRY_RUN (build only)";
-                manifest.CandidateId = $"cand-dry-{HashString(runId).Substring(0, 8)}";
-                _audit.Log("sandbox-run", runId, "Dry run: build passed, gate skipped", true);
+                manifest.GatePassed = dryRun;
+                manifest.TestResultsSummary = buildOnly ? "BUILD_ONLY (Core+Net publish)" : "DRY_RUN (build only)";
+                manifest.CandidateId = buildOnly ? $"cand-{HashString(runId + commitOrRef).Substring(0, 8)}" : $"cand-dry-{HashString(runId).Substring(0, 8)}";
+                _audit.Log("sandbox-run", runId, buildOnly ? "Build only: Core+Net published, candidate ready" : "Dry run: build passed, gate skipped", true);
                 return new SandboxRunResult
                 {
                     Success = true,
@@ -176,14 +176,22 @@ public class SandboxRunner
     private (bool success, string? errorDetails) BuildInSandbox(string sandboxDir, string buildLogPath, bool skipNetBuild = false)
     {
         var logLines = new List<string>();
-        void AppendLog(string? line) { if (line != null) logLines.Add(line); }
+        var logSb = new System.Text.StringBuilder();
+        void AppendLog(string? line)
+        {
+            if (line != null) { logLines.Add(line); logSb.AppendLine(line); }
+        }
+        void WriteLog(string s) { try { File.AppendAllText(buildLogPath, s); } catch { } }
 
         try
         {
             var coreDir = Path.Combine(sandboxDir, "core");
             var config = skipNetBuild ? "Debug" : "Release";
-            var coreOutDir = Path.Combine(coreDir, "bin", config, "net8.0");
+            var coreOutDir = skipNetBuild
+                ? Path.Combine(coreDir, "bin", config, "net8.0")
+                : Path.Combine(coreDir, "bin", config, "net8.0", "publish");
 
+            AppendLog("=== dotnet publish ===");
             var psi = new ProcessStartInfo
             {
                 FileName = "dotnet",
@@ -201,8 +209,7 @@ public class SandboxRunner
             p.WaitForExit(120000);
             var output = stdout + "\n" + stderr;
             foreach (var line in output.Split('\n')) AppendLog(line.TrimEnd());
-
-            try { File.WriteAllText(buildLogPath, output); } catch { }
+            try { File.WriteAllText(buildLogPath, logSb.ToString()); } catch { }
 
             if (p.ExitCode != 0)
             {
@@ -214,42 +221,79 @@ public class SandboxRunner
             if (skipNetBuild) return (true, null);
 
             var netDir = Path.Combine(sandboxDir, "net");
-            if (File.Exists(Path.Combine(netDir, "package.json")))
+            if (!File.Exists(Path.Combine(netDir, "package.json")))
+                return (false, "Missing artifacts: net dist index.js (package.json not found)");
+
+            AppendLog("");
+            AppendLog("=== npm ci ===");
+            WriteLog("\n--- npm ci ---\n");
+            var npmCi = Process.Start(new ProcessStartInfo
             {
-                try
+                FileName = "cmd",
+                Arguments = "/c npm ci",
+                WorkingDirectory = netDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            if (npmCi != null)
+            {
+                var npmCiOut = npmCi.StandardOutput.ReadToEnd() + "\n" + npmCi.StandardError.ReadToEnd();
+                foreach (var line in npmCiOut.Split('\n')) AppendLog(line.TrimEnd());
+                WriteLog(npmCiOut);
+                npmCi.WaitForExit(120000);
+                if (npmCi.ExitCode != 0)
                 {
-                    var npmPsi = new ProcessStartInfo
-                    {
-                        FileName = "npm",
-                        Arguments = "run build",
-                        WorkingDirectory = netDir,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    var npm = Process.Start(npmPsi);
-                    if (npm != null)
-                    {
-                        var npmOut = npm.StandardOutput.ReadToEnd() + "\n" + npm.StandardError.ReadToEnd();
-                        foreach (var line in npmOut.Split('\n')) AppendLog(line.TrimEnd());
-                        try { File.AppendAllText(buildLogPath, "\n--- npm build ---\n" + npmOut); } catch { }
-                        npm.WaitForExit(90000);
-                        if (npm.ExitCode != 0)
-                        {
-                            var last50 = string.Join("\n", logLines.TakeLast(50));
-                            return (false, RedactBuildOutput(last50));
-                        }
-                    }
+                    var last50 = string.Join("\n", logLines.TakeLast(50));
+                    return (false, RedactBuildOutput(last50));
                 }
-                catch (Exception ex) { return (false, ex.Message); }
             }
 
+            AppendLog("");
+            AppendLog("=== npm run build (tsc) ===");
+            WriteLog("\n--- npm run build ---\n");
+            var npmPsi = new ProcessStartInfo
+            {
+                FileName = "cmd",
+                Arguments = "/c npm run build",
+                WorkingDirectory = netDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            var npm = Process.Start(npmPsi);
+            if (npm != null)
+            {
+                var npmOut = npm.StandardOutput.ReadToEnd() + "\n" + npm.StandardError.ReadToEnd();
+                foreach (var line in npmOut.Split('\n')) AppendLog(line.TrimEnd());
+                WriteLog(npmOut);
+                npm.WaitForExit(90000);
+                if (npm.ExitCode != 0)
+                {
+                    var last50 = string.Join("\n", logLines.TakeLast(50));
+                    return (false, RedactBuildOutput(last50));
+                }
+            }
+
+            var coreDll = Path.Combine(coreOutDir, "Archimedes.Core.dll");
+            var netJs = Path.Combine(netDir, "dist", "index.js");
+            var missing = new List<string>();
+            if (!File.Exists(coreDll)) missing.Add("core publish dll");
+            if (!File.Exists(netJs)) missing.Add("net dist index.js");
+            if (missing.Count > 0)
+            {
+                try { File.WriteAllText(buildLogPath, logSb.ToString()); } catch { }
+                return (false, "Missing artifacts: " + string.Join("; ", missing));
+            }
+
+            try { File.WriteAllText(buildLogPath, logSb.ToString()); } catch { }
             return (true, null);
         }
         catch (Exception ex)
         {
-            try { File.WriteAllText(buildLogPath, ex.ToString()); } catch { }
+            try { File.AppendAllText(buildLogPath, "\n--- exception ---\n" + ex.ToString()); } catch { }
             return (false, ex.Message);
         }
     }
@@ -267,7 +311,11 @@ public class SandboxRunner
     private Process? StartCore(string sandboxDir, string dataPath)
     {
         var coreDir = Path.Combine(sandboxDir, "core");
-        var exe = Path.Combine(coreDir, "bin", "Release", "net8.0", "Archimedes.Core.dll");
+        var exe = Path.Combine(coreDir, "bin", "Release", "net8.0", "publish", "Archimedes.Core.dll");
+        if (!File.Exists(exe))
+            exe = Path.Combine(coreDir, "bin", "Release", "net8.0", "Archimedes.Core.dll");
+        if (!File.Exists(exe))
+            exe = Path.Combine(coreDir, "bin", "Debug", "net8.0", "publish", "Archimedes.Core.dll");
         if (!File.Exists(exe))
             exe = Path.Combine(coreDir, "bin", "Debug", "net8.0", "Archimedes.Core.dll");
         if (!File.Exists(exe)) return null;

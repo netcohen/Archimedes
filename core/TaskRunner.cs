@@ -7,7 +7,7 @@ namespace Archimedes.Core;
 
 /// <summary>
 /// Background service that advances RUNNING tasks by executing plan steps.
-/// Uses HTTP-based execution for testsite workflows (no browser automation required).
+/// Phase 17: browser.* actions are forwarded to Net's Playwright executor.
 /// </summary>
 public class TaskRunner
 {
@@ -38,6 +38,10 @@ public class TaskRunner
     
     private readonly StorageManager? _storageManager;
 
+    // Separate client for browser calls — longer timeout (Playwright can be slow)
+    private readonly HttpClient _browserHttpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
+    private readonly string _netBaseUrl;
+
     public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient, StorageManager? storageManager = null)
     {
         _taskService = taskService;
@@ -45,6 +49,7 @@ public class TaskRunner
         _httpClient = httpClient;
         _storageManager = storageManager;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        _netBaseUrl = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
     }
     
     public void Start()
@@ -350,15 +355,15 @@ public class TaskRunner
                 "http.get" => await ExecuteHttpGet(taskId, step, ct),
                 "http.post" => await ExecuteHttpPost(taskId, step, ct),
                 
-                // Browser actions - simulate with HTTP for testsite
-                "browser.openUrl" => await ExecuteHttpGet(taskId, step, ct),
-                "browser.fill" => new StepExecutionResult { Success = true },
-                "browser.click" => new StepExecutionResult { Success = true },
-                "browser.waitFor" => new StepExecutionResult { Success = true },
-                "browser.extractTable" => await ExecuteHttpFetchData(taskId, step, ct),
-                "browser.downloadFile" => await ExecuteHttpDownloadCsv(taskId, step, ct),
-                "browser.screenshotSelector" => new StepExecutionResult { Success = true },
-                "browser.detectLoginForm" => new StepExecutionResult { Success = true },
+                // Browser actions — forwarded to Net's Playwright executor (Phase 17)
+                "browser.openUrl" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.fill" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.click" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.waitFor" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.extractTable" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.downloadFile" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.screenshotSelector" => await ExecuteBrowserStep(taskId, step, ct),
+                "browser.detectLoginForm" => await ExecuteBrowserStep(taskId, step, ct),
                 
                 // Approval actions
                 "approval.requestConfirmation" => ExecuteRequestApproval(taskId, step, "CONFIRMATION"),
@@ -472,6 +477,78 @@ public class TaskRunner
         return new StepExecutionResult { Success = response.IsSuccessStatusCode };
     }
     
+    /// <summary>
+    /// Phase 17: Forwards a browser.* step to Net's Playwright executor.
+    /// POSTs to /tool/browser/runStep and waits for a synchronous response.
+    /// Falls back gracefully if Net is unavailable.
+    /// </summary>
+    private async Task<StepExecutionResult> ExecuteBrowserStep(string taskId, PlanStep step, CancellationToken ct)
+    {
+        // Strip "browser." prefix: "browser.click" → "click"
+        var action = step.Action.StartsWith("browser.") ? step.Action[8..] : step.Action;
+        var runId  = $"{taskId}-{step.Index}-{action}";
+
+        var requestBody = JsonSerializer.Serialize(new
+        {
+            steps = new[]
+            {
+                new { action, @params = step.Params ?? new Dictionary<string, object>() }
+            },
+            runId
+        });
+
+        AddTrace("INFO", $"Browser→Net: {action} (runId={runId})", taskId);
+
+        try
+        {
+            var content  = new StringContent(requestBody, Encoding.UTF8, "application/json");
+            var url      = $"{_netBaseUrl}/tool/browser/runStep";
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var response = await _browserHttpClient.PostAsync(url, content, linkedCts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(ct);
+                AddTrace("WARN", $"Net returned {response.StatusCode} for {action}", taskId);
+                return new StepExecutionResult { Success = false, Error = $"Net {response.StatusCode}: {errorBody}" };
+            }
+
+            var json   = await response.Content.ReadAsStringAsync(ct);
+            var status = JsonSerializer.Deserialize<BrowserRunStatusDto>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (status == null)
+                return new StepExecutionResult { Success = false, Error = "Invalid browser response from Net" };
+
+            if (status.Status == "completed")
+            {
+                var firstResult = status.Results?.FirstOrDefault();
+                var data = firstResult?.Data?.ToString();
+                StoreArtifact(taskId, $"browser_{action}", data ?? "ok");
+                AddTrace("INFO", $"Browser {action} completed in {firstResult?.DurationMs}ms", taskId);
+                return new StepExecutionResult { Success = true, Data = data };
+            }
+
+            var errMsg = status.Error
+                ?? status.Results?.FirstOrDefault(r => !r.Success)?.Error
+                ?? $"Browser step '{action}' failed (status={status.Status})";
+            AddTrace("WARN", $"Browser {action} failed: {errMsg}", taskId);
+            return new StepExecutionResult { Success = false, Error = errMsg };
+        }
+        catch (HttpRequestException ex)
+        {
+            // Net unreachable — degrade gracefully for non-critical steps
+            AddTrace("WARN", $"Net unreachable for browser step {action}: {ex.Message}", taskId);
+            return new StepExecutionResult { Success = false, Error = $"Net unavailable: {ex.Message}" };
+        }
+        catch (TaskCanceledException)
+        {
+            AddTrace("WARN", $"Browser step {action} timed out (120s)", taskId);
+            return new StepExecutionResult { Success = false, Error = $"Browser timeout: {action}" };
+        }
+    }
+
     private StepExecutionResult ExecuteRequestApproval(string taskId, PlanStep step, string type)
     {
         var message = step.Params?.GetValueOrDefault("message")?.ToString() 
@@ -646,4 +723,23 @@ public class StepExecutionResult
     public string? Data { get; set; }
     public bool RequiresApproval { get; set; }
     public string? ApprovalId { get; set; }
+}
+
+// ── Phase 17: DTOs for Net browser response ───────────────────────────────────
+
+internal class BrowserRunStatusDto
+{
+    public string RunId { get; set; } = "";
+    public string Status { get; set; } = "";   // "completed" | "failed" | "running"
+    public List<BrowserStepResultDto> Results { get; set; } = new();
+    public string? Error { get; set; }
+}
+
+internal class BrowserStepResultDto
+{
+    public bool Success { get; set; }
+    public string Action { get; set; } = "";
+    public int DurationMs { get; set; }
+    public System.Text.Json.JsonElement? Data { get; set; }
+    public string? Error { get; set; }
 }

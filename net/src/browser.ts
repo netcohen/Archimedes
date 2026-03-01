@@ -11,7 +11,8 @@ export type BrowserAction =
   | "waitFor"
   | "extractTable"
   | "downloadFile"
-  | "screenshotSelector";
+  | "screenshotSelector"
+  | "detectLoginForm";
 
 export interface BrowserStep {
   action: BrowserAction;
@@ -161,6 +162,45 @@ async function executeStep(
         result.data = { path: screenshotPath };
         result.success = true;
         safeLog("Browser", `Screenshot: ${selector} -> ${filename}`);
+        break;
+      }
+
+      case "detectLoginForm": {
+        const data = await page.evaluate(() => {
+          const inputs = Array.from(document.querySelectorAll("input"));
+          const passwordInput = inputs.find((i) => i.type === "password");
+          const usernameInput = inputs.find(
+            (i) =>
+              i.type === "text" ||
+              i.type === "email" ||
+              /user|email|login/i.test(i.name || i.id)
+          );
+          const submitBtn = document.querySelector<HTMLElement>(
+            'button[type="submit"], input[type="submit"]'
+          );
+          const usernameSelector = usernameInput
+            ? usernameInput.id
+              ? `#${usernameInput.id}`
+              : `[name="${usernameInput.name}"]`
+            : null;
+          const passwordSelector = passwordInput
+            ? passwordInput.id
+              ? `#${passwordInput.id}`
+              : `[name="${passwordInput.name}"]`
+            : null;
+          const submitSelector = submitBtn
+            ? submitBtn.id
+              ? `#${submitBtn.id}`
+              : 'button[type="submit"]'
+            : null;
+          return {
+            found: !!passwordInput,
+            selectors: { username: usernameSelector, password: passwordSelector, submit: submitSelector },
+          };
+        });
+        result.data = data;
+        result.success = true;
+        safeLog("Browser", `DetectLoginForm: found=${(data as { found: boolean }).found}`);
         break;
       }
 
