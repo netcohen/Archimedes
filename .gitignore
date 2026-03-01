@@ -61,3 +61,6 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
+# Claude Code session data
+.claude/
+
