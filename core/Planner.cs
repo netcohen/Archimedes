@@ -9,13 +9,16 @@ namespace Archimedes.Core;
 /// </summary>
 public class Planner
 {
-    private readonly LLMAdapter _llmAdapter;
-    private readonly PolicyEngine _policyEngine;
-    
-    public Planner(LLMAdapter llmAdapter, PolicyEngine policyEngine)
+    private readonly LLMAdapter      _llmAdapter;
+    private readonly PolicyEngine    _policyEngine;
+    private readonly ProcedureStore? _procedureStore;
+
+    public Planner(LLMAdapter llmAdapter, PolicyEngine policyEngine,
+                   ProcedureStore? procedureStore = null)
     {
-        _llmAdapter = llmAdapter;
-        _policyEngine = policyEngine;
+        _llmAdapter      = llmAdapter;
+        _policyEngine    = policyEngine;
+        _procedureStore  = procedureStore;
     }
     
     /// <summary>
@@ -70,19 +73,68 @@ public class Planner
             };
         }
         
-        // Step 4: Build deterministic plan
+        // Step 4a: Check Procedure Memory cache (Phase 21)
+        var cachedProc = _procedureStore?.FindBest(interpretation.Intent, userPrompt);
+        if (cachedProc != null)
+        {
+            ArchLogger.LogInfo(
+                $"[Planner] Cache HIT for intent={interpretation.Intent} " +
+                $"procedureId={cachedProc.Id} successRate={cachedProc.SuccessRate:P0}");
+
+            // Update last-used timestamp
+            cachedProc.LastUsedAt = DateTime.UtcNow;
+            _procedureStore!.Save(cachedProc);
+
+            // Mark plan as coming from cache
+            cachedProc.Plan.ProcedureId       = cachedProc.Id;
+            cachedProc.Plan.FromProcedureCache = true;
+
+            return new PlanResult
+            {
+                Success          = true,
+                Intent           = interpretation.Intent,
+                Confidence       = interpretation.Confidence,
+                Plan             = cachedProc.Plan,
+                PolicyDecision   = policyResult.Decision,
+                RequiresApproval = policyResult.Decision == PolicyDecision.REQUIRE_APPROVAL,
+                RequiresSecret   = policyResult.Decision == PolicyDecision.REQUIRE_SECRET,
+                RequiresCaptcha  = policyResult.Decision == PolicyDecision.REQUIRE_CAPTCHA,
+                ProcedureId      = cachedProc.Id,
+                FromProcedureCache = true
+            };
+        }
+
+        // Step 4b: Build deterministic plan + save to Procedure Memory
         var plan = BuildPlanForIntent(interpretation.Intent, slots, policyResult);
-        
+
+        if (_procedureStore != null)
+        {
+            var newRecord = new ProcedureRecord
+            {
+                Intent        = interpretation.Intent,
+                PromptExample = userPrompt,
+                Keywords      = ProcedureStore.ExtractKeywords(userPrompt),
+                Plan          = plan
+            };
+            var procId = _procedureStore.Save(newRecord);
+            plan.ProcedureId       = procId;
+            plan.FromProcedureCache = false;
+            ArchLogger.LogInfo(
+                $"[Planner] Saved new procedure {procId} for intent={interpretation.Intent}");
+        }
+
         return new PlanResult
         {
-            Success = true,
-            Intent = interpretation.Intent,
-            Confidence = interpretation.Confidence,
-            Plan = plan,
-            PolicyDecision = policyResult.Decision,
+            Success          = true,
+            Intent           = interpretation.Intent,
+            Confidence       = interpretation.Confidence,
+            Plan             = plan,
+            PolicyDecision   = policyResult.Decision,
             RequiresApproval = policyResult.Decision == PolicyDecision.REQUIRE_APPROVAL,
-            RequiresSecret = policyResult.Decision == PolicyDecision.REQUIRE_SECRET,
-            RequiresCaptcha = policyResult.Decision == PolicyDecision.REQUIRE_CAPTCHA
+            RequiresSecret   = policyResult.Decision == PolicyDecision.REQUIRE_SECRET,
+            RequiresCaptcha  = policyResult.Decision == PolicyDecision.REQUIRE_CAPTCHA,
+            ProcedureId      = plan.ProcedureId,
+            FromProcedureCache = false
         };
     }
     
@@ -346,16 +398,20 @@ public class Planner
 
 public class PlanResult
 {
-    public bool Success { get; set; }
-    public string Intent { get; set; } = "";
-    public double Confidence { get; set; }
-    public string? Error { get; set; }
-    public TaskPlan? Plan { get; set; }
+    public bool    Success     { get; set; }
+    public string  Intent      { get; set; } = "";
+    public double  Confidence  { get; set; }
+    public string? Error       { get; set; }
+    public TaskPlan? Plan      { get; set; }
     public PolicyDecision PolicyDecision { get; set; }
     public bool RequiresApproval { get; set; }
-    public bool RequiresSecret { get; set; }
-    public bool RequiresCaptcha { get; set; }
+    public bool RequiresSecret   { get; set; }
+    public bool RequiresCaptcha  { get; set; }
     public List<string> ClarificationQuestions { get; set; } = new();
+
+    // Phase 21: Procedure Memory
+    public string? ProcedureId        { get; set; }
+    public bool    FromProcedureCache  { get; set; }
 }
 
 public class PlannerRequest

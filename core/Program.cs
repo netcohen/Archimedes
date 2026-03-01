@@ -30,7 +30,11 @@ var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
 var llmAdapter = new LLMAdapter();
-var planner = new Planner(llmAdapter, policyEngine);
+
+// Phase 21: Procedure Memory
+var procedureStore = new ProcedureStore();
+
+var planner = new Planner(llmAdapter, policyEngine, procedureStore);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
 
@@ -44,13 +48,14 @@ var storageConfig = new StorageConfig
     MinFreeSpaceMB = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_MIN_FREE_MB"), out var mfm) ? mfm : 500
 };
 var storageManager = new StorageManager(storageConfig);
-// Phase 19: Observability — TraceService (singleton, no DI needed)
+// Phase 19: Observability
 var traceService = new TraceService();
 
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
 
-var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(), storageManager, traceService, criteriaEngine);
+var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(),
+    storageManager, traceService, criteriaEngine, procedureStore);
 taskRunner.Start();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
@@ -785,6 +790,64 @@ app.MapGet("/task/{id}/outcome", (string id) =>
         stepCount      = stepOutcomes.Count,
         steps          = stepOutcomes
     });
+});
+
+// ── Phase 21: Procedure Memory ────────────────────────────────────────────────
+
+// List all stored procedures
+app.MapGet("/procedures", () =>
+{
+    var all = procedureStore.GetAll();
+    return Results.Json(new
+    {
+        count      = all.Count,
+        procedures = all.Select(p => new
+        {
+            id            = p.Id,
+            intent        = p.Intent,
+            promptExample = p.PromptExample,
+            keywords      = p.Keywords,
+            successCount  = p.SuccessCount,
+            failureCount  = p.FailureCount,
+            successRate   = p.SuccessRate,
+            totalUses     = p.TotalUses,
+            createdAt     = p.CreatedAt,
+            lastUsedAt    = p.LastUsedAt,
+            lastSuccessAt = p.LastSuccessAt,
+            stepCount     = p.Plan.Steps.Count
+        })
+    });
+});
+
+// Get a specific procedure (full plan included)
+app.MapGet("/procedures/{id}", (string id) =>
+{
+    var proc = procedureStore.GetById(id);
+    if (proc == null) return Results.NotFound(new { error = "Procedure not found" });
+
+    return Results.Json(new
+    {
+        id            = proc.Id,
+        intent        = proc.Intent,
+        promptExample = proc.PromptExample,
+        keywords      = proc.Keywords,
+        successCount  = proc.SuccessCount,
+        failureCount  = proc.FailureCount,
+        successRate   = proc.SuccessRate,
+        totalUses     = proc.TotalUses,
+        createdAt     = proc.CreatedAt,
+        lastUsedAt    = proc.LastUsedAt,
+        lastSuccessAt = proc.LastSuccessAt,
+        plan          = proc.Plan
+    });
+});
+
+// Delete a procedure (e.g. if it became stale or incorrect)
+app.MapDelete("/procedures/{id}", (string id) =>
+{
+    var deleted = procedureStore.Delete(id);
+    if (!deleted) return Results.NotFound(new { error = "Procedure not found" });
+    return Results.Ok(new { deleted = true, id });
 });
 
 app.MapGet("/tasks/running", () =>

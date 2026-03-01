@@ -287,12 +287,23 @@ public class TaskService
     {
         var task = _store.GetTask(taskId);
         if (task == null) return null;
-        
+
         task.CurrentStep = step;
         task.UpdatedAtUtc = DateTime.UtcNow;
-        
+
         _store.SaveTask(task);
         return task;
+    }
+
+    /// <summary>Phase 21: Store which procedure was used for this task.</summary>
+    public void SetProcedureId(string taskId, string procedureId)
+    {
+        var task = _store.GetTask(taskId);
+        if (task == null) return;
+
+        task.ProcedureId  = procedureId;
+        task.UpdatedAtUtc = DateTime.UtcNow;
+        _store.SaveTask(task);
     }
     
     public TaskPlan? GetPlan(string taskId)

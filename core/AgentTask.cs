@@ -45,7 +45,11 @@ public class TaskPlan
     public string? Intent { get; set; }
     public List<PlanStep> Steps { get; set; } = new();
     public string? Hash { get; set; }
-    
+
+    // Phase 21: Procedure Memory
+    public string? ProcedureId        { get; set; }
+    public bool    FromProcedureCache  { get; set; }
+
     public void ComputeHash()
     {
         var json = JsonSerializer.Serialize(Steps);
@@ -91,6 +95,9 @@ public class AgentTask
     public TaskState State { get; set; } = TaskState.QUEUED;
     public int CurrentStep { get; set; }
     public string? Error { get; set; }
+
+    // Phase 21: Procedure Memory - which procedure was used (if any)
+    public string? ProcedureId { get; set; }
     
     [JsonIgnore]
     public string? PlanJsonEncrypted { get; set; }

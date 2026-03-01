@@ -39,6 +39,7 @@ public class TaskRunner
     private readonly StorageManager?        _storageManager;
     private readonly TraceService?          _traceService;        // Phase 19: Observability
     private readonly SuccessCriteriaEngine? _criteriaEngine;      // Phase 20: Success Criteria
+    private readonly ProcedureStore?        _procedureStore;      // Phase 21: Procedure Memory
 
     // Separate client for browser calls — longer timeout (Playwright can be slow)
     private readonly HttpClient _browserHttpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
@@ -46,7 +47,7 @@ public class TaskRunner
 
     public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient,
         StorageManager? storageManager = null, TraceService? traceService = null,
-        SuccessCriteriaEngine? criteriaEngine = null)
+        SuccessCriteriaEngine? criteriaEngine = null, ProcedureStore? procedureStore = null)
     {
         _taskService     = taskService;
         _planner         = planner;
@@ -54,6 +55,7 @@ public class TaskRunner
         _storageManager  = storageManager;
         _traceService    = traceService;
         _criteriaEngine  = criteriaEngine;
+        _procedureStore  = procedureStore;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
         _netBaseUrl = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
     }
@@ -296,6 +298,15 @@ public class TaskRunner
                 plan = planResult.Plan;
                 AddTrace("INFO", $"Plan created: {plan.Steps.Count} steps, hash={plan.Hash}", task.TaskId);
 
+                // Phase 21: store ProcedureId on the task for outcome tracking
+                if (!string.IsNullOrEmpty(planResult.ProcedureId))
+                {
+                    task.ProcedureId = planResult.ProcedureId;
+                    _taskService.SetProcedureId(task.TaskId, planResult.ProcedureId);
+                }
+                if (planResult.FromProcedureCache)
+                    AddTrace("INFO", $"Plan from procedure cache id={planResult.ProcedureId}", task.TaskId);
+
                 // Refresh task state
                 task = _taskService.GetTask(task.TaskId)!;
             }
@@ -383,6 +394,10 @@ public class TaskRunner
         {
             _executingTasks.TryRemove(task.TaskId, out _);
             _traceService?.Complete(taskCorrId, taskSucceeded);
+
+            // Phase 21: record outcome in ProcedureStore
+            if (!string.IsNullOrEmpty(task.ProcedureId))
+                _procedureStore?.RecordOutcome(task.ProcedureId, taskSucceeded);
         }
     }
     
