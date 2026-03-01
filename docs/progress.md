@@ -1632,28 +1632,114 @@ worked, and can move between machines while continuing to develop itself.
 
 ---
 
-### Phase 19 - Observability
+### Phase 19 - Observability ✅
+
+**Status:** Complete (2026-03-01)
 
 **What:** Every step leaves a structured trace. The system knows exactly what it did and why it failed.
 
-- Structured step-level trace with correlation IDs per task run
-- Typed failure codes (not generic "failed": timeout / selector-not-found / http-error / parse-error)
-- Execution snapshots persisted to disk (survive Core crash)
-- Trace queryable per task via /task/{id}/trace API
+**Changes:**
 
-**Why first:** Success Criteria Engine needs traces to evaluate outcomes.
-Failure Dialogue needs execution graphs to explain failures. Without this, both are blind.
+| File | Change |
+|------|--------|
+| core/FailureCode.cs | NEW - 20 typed failure codes across 6 domains |
+| core/TraceModels.cs | NEW - TraceStep + ExecutionTrace models |
+| core/TraceService.cs | NEW - in-memory active map + circular buffer(200) + disk persistence |
+| core/TaskRunner.cs | Added TraceService integration, task-level traces |
+| core/Program.cs | CorrelationId middleware, /traces + /traces/{id} endpoints |
+
+**Architecture:**
+
+    Every HTTP request:
+    → CorrelationId middleware generates/reads X-Correlation-Id header
+    → TraceService.Begin() opens trace
+    → Each step: BeginStep() / CompleteStep() with FailureCode + details
+    → TraceService.Complete() persists to %LOCALAPPDATA%\Archimedes\traces\{id}.json
+
+**FailureCode domains:**
+- LLM: LLM_TIMEOUT(100), LLM_INFERENCE_ERROR(101)
+- Intent: INTENT_AMBIGUOUS(200), PLAN_GENERATION_FAILED(204)
+- Step: STEP_EXECUTION_FAILED(300), BROWSER_STEP_FAILED(301), HTTP_STEP_FAILED(303)
+- Policy: POLICY_DENIED(400)
+- Approval: APPROVAL_TIMEOUT(500)
+- Infra: TASK_WATCHDOG_TIMEOUT(600), NET_UNAVAILABLE(602), MISSING_PROMPT(603)
+
+**Gate results (26/26 PASS):**
+- Core sanity, CorrelationId (3), Trace list (3), Trace by ID (4)
+- Step-level trace LLM (3), Persistence (2), E2E Planner (1)
+- FailureCode accuracy (3), Step completeness (2), Timing sanity (2), Concurrent isolation (2)
+
+**How to run:** `.\scripts\phase19-ready-gate.ps1`
 
 ---
 
-### Phase 20 - Success Criteria Engine
+### Phase 20 - Success Criteria Engine ✅
 
-**What:** Every task defines what success looks like before it starts.
+**Status:** Complete (2026-03-01)
 
-- LLM extracts success criteria from the user prompt
-- Internal DSL to represent criteria (e.g. rowCount > 0 / price < threshold / element visible)
-- Deterministic Evaluator checks criteria against trace at end of run
-- Automatic retry rules based on failure type and criteria
+**What:** Moves Archimedes from binary success/failure (HTTP 200 = win) to evidence-based outcome verification.
+
+**Changes:**
+
+| File | Change |
+|------|--------|
+| core/SuccessCriteriaEngine.cs | NEW - OutcomeResult enum + per-action verifiers |
+| core/TraceModels.cs | Added Outcome + Evidence fields to TraceStep |
+| core/TraceService.cs | Added outcome + evidence params to CompleteStep() |
+| core/TaskRunner.cs | Calls criteriaEngine.Verify() after each step |
+| core/Program.cs | POST /criteria/verify + GET /task/{id}/outcome endpoints |
+
+**OutcomeResult values:**
+
+    VERIFIED      - success confirmed by concrete evidence
+    UNVERIFIED    - ran successfully but evidence inconclusive
+    PARTIAL       - some criteria met, not all
+    FAILED_VERIFY - step ran but outcome verification failed
+    NOT_APPLICABLE - no criteria defined for this action
+
+**Per-action verifiers:**
+- `http.login` - checks token / access_token / authToken or success=true
+- `http.fetchData` - checks array length > 0, or rows/data/items/records property
+- `http.downloadCsv` - checks commas + newlines + line count > 1
+- `browser.*` - trusts Net/Playwright result
+- `approval.*` / `scheduler.*` - always VERIFIED
+- unknown actions - NOT_APPLICABLE
+
+**Gate results (22/22 PASS):**
+- Core sanity (2), http.login (4), http.fetchData (4), http.downloadCsv (3)
+- Special actions (3), Response structure (2), Trace integration (2), Task outcome (2)
+
+**How to run:** `.\scripts\phase20-ready-gate.ps1`
+
+---
+
+### Full System Regression + Stress Test (2026-03-02) ✅
+
+**Status:** Complete - all systems stable
+
+**Test suite results:**
+
+| Suite | Result |
+|-------|--------|
+| Phase 19 gate | 26/26 PASS |
+| Phase 20 gate | 22/22 PASS |
+| Master test Layer 1 (Sanity) | 3/3 PASS |
+| Master test Layer 2 (Phase 16+18 regression) | 2/2 PASS |
+| Master test Layer 2 (Phase 17 browser) | 5/7 (2 pre-existing, unrelated to 19/20) |
+| Master test Layer 3 (LLM Basic) | 5/5 PASS |
+| Master test Layer 4 (LLM Quality - 10 prompts) | 3/3 PASS (9/10 accuracy, avg 5390ms) |
+| Master test Layer 5 (Stability - 10 calls) | 3/3 PASS (memory delta +2MB) |
+
+**Stress test results (scripts/stress-test.ps1):**
+
+| Section | Result | Key metric |
+|---------|--------|------------|
+| Burst - 50 concurrent /health | PASS | 50/50, 6.3 req/s |
+| LLM stress - 15 sequential calls | PASS | 15/15, avg 5269ms, delta +0MB |
+| Buffer overflow - 260 traces | PASS | buffer capped at 200, FIFO eviction correct |
+| Soak - 15 minutes | PASS | 28/28 health OK, 9/9 tasks, drift +0MB |
+
+**Overall: 14 PASS, 3 WARN (non-blocking), 0 FAIL**
 
 ---
 
@@ -1668,7 +1754,40 @@ Failure Dialogue needs execution graphs to explain failures. Without this, both 
 
 ---
 
-### Phase 22 - Failure Dialogue
+### Phase 22 - Chat UI
+
+**What:** A clean chat interface on the screen — the primary way to interact with Archimedes.
+
+- Web-based chat served by Core at GET /chat (vanilla HTML/JS, no external dependencies)
+- Full Hebrew RTL support (CSS direction: rtl)
+- Text only — no file attachments
+- Chromium kiosk mode on Ubuntu: machine boots directly into the chat
+- POST /chat/message endpoint routes input to LLM + task engine
+- Auto-start: systemd service for Core + Chromium autostart on login
+
+**Why here:** Procedure Memory (Phase 21) gives Archimedes something useful to say.
+The Chat UI is how the user interacts with that capability directly.
+
+---
+
+### Phase 23 - Linux Port + Deployment
+
+**What:** Archimedes runs natively on Ubuntu 24.04 LTS — the dedicated deployment OS.
+
+- SandboxRunner.cs: "powershell" → "pwsh" (one-line fix)
+- Scripts: replace hardcoded C:\ paths with $PSScriptRoot-relative paths
+- systemd service: Archimedes Core starts on boot, auto-restarts on crash
+- Chromium kiosk: opens to localhost:5051/chat on login
+- Auto-login: no password prompt on boot
+- Cleanup script: removes Firefox, LibreOffice, Thunderbird, games (~1.5GB freed)
+- Validated on WSL2 first, then bare metal Ubuntu 24.04 LTS Desktop
+
+**Deployment machine:** Ubuntu 24.04 LTS Desktop
+**Boot sequence:** Power on → auto-login → Archimedes Core starts → Chromium opens → chat ready
+
+---
+
+### Phase 24 - Failure Dialogue
 
 **What:** A failure becomes a conversation, not a dead end.
 
@@ -1679,7 +1798,7 @@ Failure Dialogue needs execution graphs to explain failures. Without this, both 
 
 ---
 
-### Phase 23 - Availability Engine
+### Phase 25 - Availability Engine
 
 **What:** The system learns when the user is available and acts accordingly.
 
@@ -1690,7 +1809,7 @@ Failure Dialogue needs execution graphs to explain failures. Without this, both 
 
 ---
 
-### Phase 24 - Goal Layer + Adaptive Planner
+### Phase 26 - Goal Layer + Adaptive Planner
 
 **What:** Moves from executing tasks to pursuing goals.
 
@@ -1701,7 +1820,7 @@ Failure Dialogue needs execution graphs to explain failures. Without this, both 
 
 ---
 
-### Phase 25 - Integrations (WhatsApp, Sheets, Calendar, Email)
+### Phase 27 - Integrations (WhatsApp, Sheets, Calendar, Email)
 
 **What:** The hands of the system - real-world integrations.
 
@@ -1710,11 +1829,11 @@ Failure Dialogue needs execution graphs to explain failures. Without this, both 
 - Calendar event management
 - Email read and send
 
-Only here - because by Phase 25 the system has judgment, memory, and failure recovery.
+Only here - because by Phase 27 the system has judgment, memory, and failure recovery.
 
 ---
 
-### Phase 26 - Machine Migration (Octopus)
+### Phase 28 - Machine Migration (Octopus)
 
 **What:** The system can move itself between machines safely.
 
@@ -1726,7 +1845,7 @@ Only here - because by Phase 25 the system has judgment, memory, and failure rec
 
 ---
 
-### Phase 27 - App Self-Development
+### Phase 29 - App Self-Development
 
 **What:** Archimedes can extend its own Android app.
 
