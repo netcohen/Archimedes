@@ -216,6 +216,168 @@ Test-Case "Planner plan trace has Planner.Plan step" {
     $trace.steps | Where-Object { $_.name -eq "Planner.Plan" } | Measure-Object | ForEach-Object { $_.Count -ge 1 }
 }
 
+# ── 8. FailureCode accuracy ───────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[8] FailureCode accuracy" -ForegroundColor Yellow
+
+Test-Case "Clear LLM prompt produces failureCode None (no fallback)" {
+    $knownId = "gate-fc-clear-" + (Get-Random)
+    $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+            -Method POST -Body "export all data from testsite to CSV" `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 30 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "LLM.Interpret" } | Select-Object -First 1
+    $step.failureCode -eq "None"
+}
+
+Test-Case "Step details contains intent and confidence info" {
+    $knownId = "gate-fc-details-" + (Get-Random)
+    $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+            -Method POST -Body "export all data from testsite to CSV" `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 30 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "LLM.Interpret" } | Select-Object -First 1
+    $step.details -like "*intent=*" -and $step.details -like "*confidence=*"
+}
+
+Test-Case "Failure path: empty body to /llm/interpret produces success=false in trace" {
+    $knownId = "gate-fail-" + (Get-Random)
+    try {
+        $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+                -Method POST -Body "" `
+                -ContentType "text/plain" -UseBasicParsing -TimeoutSec 5 `
+                -Headers @{ "X-Correlation-Id" = $knownId }
+    } catch { }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $trace.success -eq $false -and $trace.httpStatusCode -eq 400
+}
+
+# ── 9. Step completeness ──────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[9] Step completeness" -ForegroundColor Yellow
+
+Test-Case "LLM.Interpret step has completedAtUtc (not null - step fully closed)" {
+    $knownId = "gate-complete-" + (Get-Random)
+    $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+            -Method POST -Body "search for invoices" `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 30 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "LLM.Interpret" } | Select-Object -First 1
+    $null -ne $step.completedAtUtc
+}
+
+Test-Case "Planner.Plan step has completedAtUtc (step fully closed)" {
+    $knownId = "gate-plancomplete-" + (Get-Random)
+    $body    = '{"UserPrompt":"export data from testsite"}'
+    $null = Invoke-WebRequest "$BaseUrl/planner/plan" `
+            -Method POST -Body $body `
+            -ContentType "application/json" -UseBasicParsing -TimeoutSec 30 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "Planner.Plan" } | Select-Object -First 1
+    $null -ne $step.completedAtUtc
+}
+
+# ── 10. Timing sanity ─────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[10] Timing sanity" -ForegroundColor Yellow
+
+Test-Case "LLM inference durationMs > 500ms (real on-device inference, not faked)" {
+    $knownId = "gate-timing-llm-" + (Get-Random)
+    $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+            -Method POST -Body "export all data from testsite" `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 60 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "LLM.Interpret" } | Select-Object -First 1
+    $step.durationMs -gt 500
+}
+
+Test-Case "Trace totalDurationMs >= LLM step durationMs" {
+    $knownId = "gate-totaldur-" + (Get-Random)
+    $null = Invoke-WebRequest "$BaseUrl/llm/interpret" `
+            -Method POST -Body "export all data from testsite" `
+            -ContentType "text/plain" -UseBasicParsing -TimeoutSec 60 `
+            -Headers @{ "X-Correlation-Id" = $knownId }
+    Start-Sleep -Milliseconds 300
+
+    $trace = Invoke-RestMethod "$BaseUrl/traces/$knownId" -TimeoutSec 5
+    $step  = $trace.steps | Where-Object { $_.name -eq "LLM.Interpret" } | Select-Object -First 1
+    $trace.totalDurationMs -ge $step.durationMs
+}
+
+# ── 11. Concurrent isolation ──────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[11] Concurrent isolation" -ForegroundColor Yellow
+
+Test-Case "Two simultaneous requests get separate traces (no cross-contamination)" {
+    $idA = "gate-concA-" + (Get-Random)
+    $idB = "gate-concB-" + (Get-Random)
+
+    $jobA = Start-Job {
+        param($url, $id)
+        Invoke-WebRequest "$url/health" -UseBasicParsing -TimeoutSec 5 `
+            -Headers @{ "X-Correlation-Id" = $id } | Out-Null
+    } -ArgumentList $BaseUrl, $idA
+
+    $jobB = Start-Job {
+        param($url, $id)
+        Invoke-WebRequest "$url/health" -UseBasicParsing -TimeoutSec 5 `
+            -Headers @{ "X-Correlation-Id" = $id } | Out-Null
+    } -ArgumentList $BaseUrl, $idB
+
+    $null = Wait-Job $jobA, $jobB
+    Remove-Job $jobA, $jobB
+    Start-Sleep -Milliseconds 400
+
+    $traceA = Invoke-RestMethod "$BaseUrl/traces/$idA" -TimeoutSec 5
+    $traceB = Invoke-RestMethod "$BaseUrl/traces/$idB" -TimeoutSec 5
+
+    $traceA.correlationId -eq $idA -and $traceB.correlationId -eq $idB `
+        -and $traceA.correlationId -ne $traceB.correlationId
+}
+
+Test-Case "Each concurrent trace has its own endpoint recorded correctly" {
+    $idC = "gate-concC-" + (Get-Random)
+    $idD = "gate-concD-" + (Get-Random)
+
+    $jobC = Start-Job {
+        param($url, $id)
+        Invoke-WebRequest "$url/health" -UseBasicParsing -TimeoutSec 5 `
+            -Headers @{ "X-Correlation-Id" = $id } | Out-Null
+    } -ArgumentList $BaseUrl, $idC
+
+    $jobD = Start-Job {
+        param($url, $id)
+        Invoke-WebRequest "$url/traces" -UseBasicParsing -TimeoutSec 5 `
+            -Headers @{ "X-Correlation-Id" = $id } | Out-Null
+    } -ArgumentList $BaseUrl, $idD
+
+    $null = Wait-Job $jobC, $jobD
+    Remove-Job $jobC, $jobD
+    Start-Sleep -Milliseconds 400
+
+    $traceC = Invoke-RestMethod "$BaseUrl/traces/$idC" -TimeoutSec 5
+    $traceD = Invoke-RestMethod "$BaseUrl/traces/$idD" -TimeoutSec 5
+
+    $traceC.endpoint -eq "/health" -and $traceD.endpoint -eq "/traces"
+}
+
 # ── Results ───────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Cyan
