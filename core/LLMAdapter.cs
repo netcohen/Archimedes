@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using LLama;
 using LLama.Common;
+using LLama.Sampling;
 
 namespace Archimedes.Core;
 
@@ -108,21 +109,28 @@ public class LLMAdapter : IDisposable
 
         try
         {
+            ArchLogger.LogInfo($"[LLM] Starting inference maxTokens={maxTokens}");
             var executor = new StatelessExecutor(_weights, _modelParams);
 
-            // Llama 3.2 Instruct chat format
+            // Llama 3.2 Instruct chat format.
+            // NOTE: do NOT include <|begin_of_text|> — LLamaSharp adds the BOS token
+            // automatically; including it here causes a double-BOS that corrupts inference.
             var prompt =
-                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
+                "<|start_header_id|>system<|end_header_id|>\n\n" +
                 systemPrompt +
                 "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n" +
                 userContent +
                 "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
 
+            ArchLogger.LogInfo($"[LLM] Prompt len={prompt.Length}, calling InferAsync...");
+
+            // In LLamaSharp 0.17.x Temperature must go through SamplingPipeline;
+            // setting it directly on InferenceParams causes a NullReferenceException.
             var inferParams = new InferenceParams
             {
-                MaxTokens   = maxTokens,
-                Temperature = 0.1f,
-                AntiPrompts = new List<string>
+                MaxTokens      = maxTokens,
+                SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.1f },
+                AntiPrompts    = new List<string>
                 {
                     "<|eot_id|>",
                     "<|end_of_text|>",
@@ -132,15 +140,16 @@ public class LLMAdapter : IDisposable
 
             var sb = new StringBuilder();
             await foreach (var token in executor.InferAsync(prompt, inferParams))
-            {
                 sb.Append(token);
-            }
 
-            return sb.ToString().Trim();
+            var result = sb.ToString().Trim();
+            ArchLogger.LogInfo($"[LLM] Inference done, output len={result.Length}");
+            return result;
         }
         catch (Exception ex)
         {
-            ArchLogger.LogWarn($"[LLM] Inference error: {ex.Message}");
+            // Log full stack trace so we can diagnose any future failure
+            ArchLogger.LogWarn($"[LLM] Inference error:\n{ex}");
             return null;
         }
     }
