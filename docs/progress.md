@@ -1781,6 +1781,29 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
+### [PLACEHOLDER] Autonomous Improvement Loop
+
+> **סטטוס:** ממתין לתשתית — אין לבנות עדיין.
+>
+> **תלויות נדרשות לפני בנייה:**
+> - Phase 25 (Failure Dialogue) — כדי לדעת *מה* שבור ולמה
+> - Phase 27 (Integrations) — כדי שיהיה data אמיתי לנתח
+> - Phase 29 (Self-Dev) — כדי שהשיפור יוכל לשנות קוד בפועל
+>
+> **מה יהיה בשלב זה:**
+> - Background loop ב-SmartScheduler שרץ כל N דקות
+> - מנתח traces אחרונים: pattern של כישלונות לפי intent / step
+> - מכייל ספי keyword scoring ב-ProcedureStore לפי outcomes
+> - בודק procedures ישנות ומסמן stale לפי failure-rate
+> - מדווח לשורת הסטטוס בצ'אט: "מנתח 3 כישלונות ב-TESTSITE_EXPORT..."
+> - תוצאות: הצעות לדיאלוג כישלון + עדכון אוטומטי של procedure scoring
+>
+> **הסיבה שלא נבנה עכשיו:**
+> בלי Failure Dialogue ו-Integrations, הלופ יוכל לנתח אבל לא לפעול.
+> זה יוצר תצוגה בלי עומק — מבנה לפני תצוגה דורש שהמבנה יהיה שלם קודם.
+
+---
+
 ### Phase 23 - Linux Port + Deployment
 
 **What:** Archimedes runs natively on Ubuntu 24.04 LTS — the dedicated deployment OS.
