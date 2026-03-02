@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 
@@ -48,17 +49,48 @@ public class EncryptedStore : IDisposable
         if (File.Exists(_keyPath))
         {
             var protectedKey = File.ReadAllBytes(_keyPath);
-            var key = ProtectedData.Unprotect(protectedKey, null, DataProtectionScope.CurrentUser);
+            var key = OsUnprotect(protectedKey);
             return Convert.ToBase64String(key);
         }
-        
+
         var newKey = new byte[32];
         RandomNumberGenerator.Fill(newKey);
-        var protected_ = ProtectedData.Protect(newKey, null, DataProtectionScope.CurrentUser);
+        var protected_ = OsProtect(newKey);
         File.WriteAllBytes(_keyPath, protected_);
-        
-        ArchLogger.LogInfo("Generated new database encryption key (DPAPI protected)");
+        OsRestrictFilePermissions(_keyPath);
+
+        var method = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "DPAPI" : "file permissions (chmod 600)";
+        ArchLogger.LogInfo($"Generated new database encryption key ({method} protected)");
         return Convert.ToBase64String(newKey);
+    }
+
+    // ── Phase 23: cross-platform key protection ───────────────────────────────
+    // Windows: DPAPI (DataProtectionScope.CurrentUser) — OS-managed, user-scoped
+    // Linux:   raw bytes stored with chmod 600 — file permission is the security layer
+    private static byte[] OsProtect(byte[] data) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser)
+            : data;
+
+    private static byte[] OsUnprotect(byte[] data) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? ProtectedData.Unprotect(data, null, DataProtectionScope.CurrentUser)
+            : data;
+
+    private static void OsRestrictFilePermissions(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+        try
+        {
+            // chmod 600: owner read+write only
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName  = "chmod",
+                Arguments = $"600 \"{path}\"",
+                UseShellExecute = false
+            })?.WaitForExit();
+        }
+        catch { /* best-effort — key is still functional without it */ }
     }
 
     private void CreateTables()

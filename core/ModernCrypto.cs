@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -153,20 +154,51 @@ public class DeviceKeyManager
         Buffer.BlockCopy(keys.PublicKey, 0, combined, 0, 32);
         Buffer.BlockCopy(keys.PrivateKey, 0, combined, 32, 32);
 
-        var protected_ = ProtectedData.Protect(combined, null, DataProtectionScope.CurrentUser);
+        // Phase 23: cross-platform key protection
+        var protected_ = OsProtect(combined);
         File.WriteAllBytes(_keyPath, protected_);
+        OsRestrictFilePermissions(_keyPath);
     }
 
     private KeyPairInfo LoadKeys()
     {
+        // Phase 23: cross-platform key protection
         var protected_ = File.ReadAllBytes(_keyPath);
-        var combined = ProtectedData.Unprotect(protected_, null, DataProtectionScope.CurrentUser);
+        var combined   = OsUnprotect(protected_);
 
         return new KeyPairInfo
         {
             PublicKey = combined[..32],
             PrivateKey = combined[32..]
         };
+    }
+
+    // ── Phase 23: cross-platform key protection ───────────────────────────────
+    // Windows: DPAPI — OS-managed, user-scoped encryption
+    // Linux:   raw bytes + chmod 600 — file permission is the security layer
+    private static byte[] OsProtect(byte[] data) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser)
+            : data;
+
+    private static byte[] OsUnprotect(byte[] data) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? ProtectedData.Unprotect(data, null, DataProtectionScope.CurrentUser)
+            : data;
+
+    private static void OsRestrictFilePermissions(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName  = "chmod",
+                Arguments = $"600 \"{path}\"",
+                UseShellExecute = false
+            })?.WaitForExit();
+        }
+        catch { /* best-effort */ }
     }
 
     public string GetPublicKeyBase64()

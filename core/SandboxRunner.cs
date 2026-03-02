@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -227,10 +228,12 @@ public class SandboxRunner
             AppendLog("");
             AppendLog("=== npm ci ===");
             WriteLog("\n--- npm ci ---\n");
+            // Phase 23: cross-platform npm invocation
+            var isWin = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             var npmCi = Process.Start(new ProcessStartInfo
             {
-                FileName = "cmd",
-                Arguments = "/c npm ci",
+                FileName  = isWin ? "cmd" : "npm",
+                Arguments = isWin ? "/c npm ci" : "ci",
                 WorkingDirectory = netDir,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -253,10 +256,11 @@ public class SandboxRunner
             AppendLog("");
             AppendLog("=== npm run build (tsc) ===");
             WriteLog("\n--- npm run build ---\n");
+            // Phase 23: cross-platform npm invocation (isWin declared above)
             var npmPsi = new ProcessStartInfo
             {
-                FileName = "cmd",
-                Arguments = "/c npm run build",
+                FileName  = isWin ? "cmd" : "npm",
+                Arguments = isWin ? "/c npm run build" : "run build",
                 WorkingDirectory = netDir,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -357,9 +361,10 @@ public class SandboxRunner
         var gatePath = Path.Combine(scriptsDir, "phase14-ready-gate.ps1");
         if (!File.Exists(gatePath)) return false;
 
+        // Phase 23: Windows → powershell.exe, Linux → pwsh
         var psi = new ProcessStartInfo
         {
-            FileName = "powershell",
+            FileName  = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "powershell" : "pwsh",
             Arguments = $"-ExecutionPolicy Bypass -File \"{gatePath}\" -SoakHours {soakHours}",
             WorkingDirectory = sandboxDir,
             UseShellExecute = false,
