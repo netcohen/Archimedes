@@ -15,19 +15,25 @@ public static class ChatHtml
           <meta name="viewport" content="width=device-width, initial-scale=1.0" />
           <title>Archimedes</title>
           <style>
+            /* ── Reset & base ─────────────────────────────────────────── */
             *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+            html, body {
+              height: 100%;
+              width: 100%;
+            }
 
             body {
               font-family: 'Segoe UI', Arial, sans-serif;
               background: #0d1117;
               color: #e6edf3;
-              height: 100vh;
               display: flex;
               flex-direction: column;
               overflow: hidden;
             }
 
             /* ── Top metrics bar ──────────────────────────────────────── */
+            /* dir="rtl" already makes flex flow RIGHT→LEFT — no row-reverse needed */
             #topbar {
               background: #161b22;
               border-bottom: 1px solid #30363d;
@@ -36,14 +42,20 @@ public static class ChatHtml
               align-items: center;
               gap: 20px;
               flex-shrink: 0;
-              flex-direction: row-reverse;
+              width: 100%;
             }
+            /* Logo anchored to right (flex-start in RTL) */
             #topbar .logo {
               font-weight: 700;
               font-size: 1rem;
               color: #58a6ff;
               letter-spacing: 1px;
-              margin-left: auto;
+            }
+            /* Version pushed to far left (flex-end in RTL) */
+            #topbar .version {
+              margin-inline-start: auto;
+              font-size: .7rem;
+              color: #484f58;
             }
             .metric {
               display: flex;
@@ -63,66 +75,22 @@ public static class ChatHtml
             }
 
             /* ── Main layout ──────────────────────────────────────────── */
+            /* dir="rtl" + flex row: first child → RIGHT, second → LEFT   */
             #main {
               display: flex;
               flex: 1;
               overflow: hidden;
-              flex-direction: row;
+              width: 100%;
+              min-height: 0;
             }
 
-            /* ── Tasks panel (LEFT side) ──────────────────────────────── */
-            #tasks-panel {
-              width: 240px;
-              border-left: 1px solid #30363d;
-              display: flex;
-              flex-direction: column;
-              background: #0d1117;
-              flex-shrink: 0;
-              order: 2;
-            }
-            #tasks-header {
-              padding: 10px 12px;
-              font-size: 0.75rem;
-              font-weight: 700;
-              color: #8b949e;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-              border-bottom: 1px solid #30363d;
-              text-align: right;
-            }
-            #tasks-list {
-              flex: 1;
-              overflow-y: auto;
-              padding: 8px;
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
-            }
-            .task-item {
-              background: #161b22;
-              border: 1px solid #30363d;
-              border-radius: 8px;
-              padding: 8px 10px;
-              font-size: 0.8rem;
-              text-align: right;
-            }
-            .task-item .t-id    { color: #484f58; font-size: 0.7rem; margin-bottom: 2px; }
-            .task-item .t-title { color: #e6edf3; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .task-item .t-state { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; display: inline-block; }
-            .s-running   { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb44; }
-            .s-pending   { background: #d2992222; color: #d29922; border: 1px solid #d2992244; }
-            .s-completed { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
-            .s-failed    { background: #f8514922; color: #f85149; border: 1px solid #f8514944; }
-            .s-other     { background: #30363d; color: #8b949e; }
-            #no-tasks    { color: #484f58; font-size: 0.8rem; text-align: center; padding: 24px 8px; }
-
-            /* ── Chat area (RIGHT side) ───────────────────────────────── */
+            /* ── Chat area (RIGHT side — first child in DOM) ──────────── */
             #chat-area {
               flex: 1;
+              min-width: 0;
               display: flex;
               flex-direction: column;
               overflow: hidden;
-              order: 1;
             }
             #messages {
               flex: 1;
@@ -131,6 +99,7 @@ public static class ChatHtml
               display: flex;
               flex-direction: column;
               gap: 10px;
+              min-height: 0;
             }
             .msg {
               max-width: 72%;
@@ -141,14 +110,14 @@ public static class ChatHtml
               word-break: break-word;
               white-space: pre-wrap;
             }
-            /* User messages: RIGHT side (RTL = natural end) */
+            /* User messages: right side (RTL flex-start) */
             .msg-user {
               background: #1f6feb;
               color: #fff;
               align-self: flex-start;
               border-bottom-right-radius: 3px;
             }
-            /* System messages: LEFT side */
+            /* System/Archimedes messages: left side */
             .msg-system {
               background: #161b22;
               color: #e6edf3;
@@ -170,16 +139,17 @@ public static class ChatHtml
             }
 
             /* ── Input bar ────────────────────────────────────────────── */
+            /* Textarea is first in DOM → right side; button is second → left side */
             #input-bar {
               padding: 10px 16px;
               border-top: 1px solid #30363d;
               display: flex;
               gap: 8px;
               background: #161b22;
-              flex-direction: row-reverse;
             }
             #msg-input {
               flex: 1;
+              min-width: 0;
               background: #21262d;
               border: 1px solid #30363d;
               color: #e6edf3;
@@ -210,6 +180,50 @@ public static class ChatHtml
             #send-btn:hover    { background: #388bfd; }
             #send-btn:disabled { background: #21262d; color: #484f58; cursor: default; }
 
+            /* ── Tasks panel (LEFT side — second child in DOM) ────────── */
+            #tasks-panel {
+              width: 240px;
+              flex-shrink: 0;
+              border-inline-start: 1px solid #30363d;
+              display: flex;
+              flex-direction: column;
+              background: #0d1117;
+            }
+            #tasks-header {
+              padding: 10px 12px;
+              font-size: 0.75rem;
+              font-weight: 700;
+              color: #8b949e;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              border-bottom: 1px solid #30363d;
+            }
+            #tasks-list {
+              flex: 1;
+              overflow-y: auto;
+              padding: 8px;
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+              min-height: 0;
+            }
+            .task-item {
+              background: #161b22;
+              border: 1px solid #30363d;
+              border-radius: 8px;
+              padding: 8px 10px;
+              font-size: 0.8rem;
+            }
+            .task-item .t-id    { color: #484f58; font-size: 0.7rem; margin-bottom: 2px; }
+            .task-item .t-title { color: #e6edf3; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .task-item .t-state { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; display: inline-block; }
+            .s-running   { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb44; }
+            .s-pending   { background: #d2992222; color: #d29922; border: 1px solid #d2992244; }
+            .s-completed { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+            .s-failed    { background: #f8514922; color: #f85149; border: 1px solid #f8514944; }
+            .s-other     { background: #30363d; color: #8b949e; }
+            #no-tasks    { color: #484f58; font-size: 0.8rem; text-align: center; padding: 24px 8px; }
+
             /* ── Status bar ───────────────────────────────────────────── */
             #statusbar {
               background: #161b22;
@@ -222,7 +236,7 @@ public static class ChatHtml
               gap: 7px;
               flex-shrink: 0;
               height: 26px;
-              direction: rtl;
+              width: 100%;
             }
             .spin {
               display: none;
@@ -245,16 +259,19 @@ public static class ChatHtml
         <body>
 
         <!-- ── Top bar ──────────────────────────────────────────────────── -->
+        <!-- In dir="rtl" flex: first child → RIGHT, last child → LEFT     -->
         <div id="topbar">
           <span id="statusdot"></span>
           <span class="logo">Archimedes</span>
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="metric" style="margin-right:auto;font-size:.7rem;color:#484f58">v0.22.0</span>
+          <span class="version">v0.22.0</span>
         </div>
 
         <!-- ── Main layout ───────────────────────────────────────────────── -->
+        <!-- First child (chat-area) → RIGHT side in RTL                     -->
+        <!-- Second child (tasks-panel) → LEFT side in RTL                   -->
         <div id="main">
 
           <!-- Chat area (RIGHT) -->
@@ -265,8 +282,9 @@ public static class ChatHtml
               </div>
             </div>
             <div id="input-bar">
-              <button id="send-btn" title="שלח">&#x27A4;</button>
+              <!-- textarea first → RIGHT side; button second → LEFT side -->
               <textarea id="msg-input" rows="1" placeholder="הזן הודעה..."></textarea>
+              <button id="send-btn" title="שלח">&#x27A4;</button>
             </div>
           </div>
 
@@ -304,9 +322,9 @@ public static class ChatHtml
           }
 
           const STATE_LABEL = {
-            Running:   'רץ', Pending:   'ממתין',
+            Running: 'רץ', Pending: 'ממתין',
             Completed: 'הושלם', Failed: 'נכשל',
-            Paused:    'מושהה', Cancelled: 'בוטל'
+            Paused: 'מושהה', Cancelled: 'בוטל'
           };
           const STATE_CSS = {
             Running: 's-running', Pending: 's-pending',
@@ -325,10 +343,10 @@ public static class ChatHtml
               document.getElementById('m-ram').textContent = used + '/' + total + 'GB';
               document.getElementById('m-up').textContent  = fmtUptime(d.uptimeSeconds);
               document.getElementById('statusdot').style.cssText =
-                'background:#3fb950;box-shadow:0 0 5px #3fb950';
+                'width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 5px #3fb950;flex-shrink:0';
             } catch {
               document.getElementById('statusdot').style.cssText =
-                'background:#f85149;box-shadow:0 0 5px #f85149';
+                'width:8px;height:8px;border-radius:50%;background:#f85149;box-shadow:0 0 5px #f85149;flex-shrink:0';
             }
           }
 
@@ -364,7 +382,7 @@ public static class ChatHtml
             try {
               const r = await fetch('/status/current');
               if (!r.ok) return;
-              const d   = await r.json();
+              const d    = await r.json();
               const spin = document.getElementById('spin');
               const txt  = document.getElementById('status-txt');
               if (d.active) {
@@ -399,7 +417,6 @@ public static class ChatHtml
 
             appendMsg(esc(text), 'msg-user');
 
-            // Show processing in status bar
             const spin = document.getElementById('spin');
             const stxt = document.getElementById('status-txt');
             spin.classList.add('on');
