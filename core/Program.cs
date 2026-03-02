@@ -34,6 +34,9 @@ var llmAdapter = new LLMAdapter();
 // Phase 21: Procedure Memory
 var procedureStore = new ProcedureStore();
 
+// Phase 24: Failure Dialogue
+var failureDialogueStore = new FailureDialogueStore();
+
 var planner = new Planner(llmAdapter, policyEngine, procedureStore);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
@@ -55,7 +58,7 @@ var traceService = new TraceService();
 var criteriaEngine = new SuccessCriteriaEngine();
 
 var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(),
-    storageManager, traceService, criteriaEngine, procedureStore);
+    storageManager, traceService, criteriaEngine, procedureStore, failureDialogueStore);
 taskRunner.Start();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
@@ -957,6 +960,81 @@ app.MapDelete("/procedures/{id}", (string id) =>
     return Results.Ok(new { deleted = true, id });
 });
 
+// ── Phase 24: Failure Dialogue ────────────────────────────────────────────────
+
+// GET /recovery-dialogues — list all pending recovery dialogues (polled by Chat UI)
+app.MapGet("/recovery-dialogues", () =>
+{
+    var pending = failureDialogueStore.GetPending();
+    return Results.Json(new
+    {
+        count     = pending.Count,
+        dialogues = pending.Select(d => new
+        {
+            dialogueId       = d.DialogueId,
+            taskId           = d.TaskId,
+            taskTitle        = d.TaskTitle,
+            failedStep       = d.FailedStep,
+            recoveryQuestion = d.RecoveryQuestion,
+            createdAt        = d.CreatedAtUtc
+        })
+    });
+});
+
+// POST /recovery-dialogues/{id}/respond — user responds with action + optional info
+app.MapPost("/recovery-dialogues/{id}/respond", async (string id, HttpRequest req) =>
+{
+    RecoveryRespondRequest? body;
+    try
+    {
+        body = await req.ReadFromJsonAsync<RecoveryRespondRequest>();
+    }
+    catch
+    {
+        return Results.BadRequest(new { error = "Invalid JSON body" });
+    }
+
+    if (body == null || string.IsNullOrWhiteSpace(body.Action))
+        return Results.BadRequest(new { error = "action is required (retry | info | dismiss)" });
+
+    var action = body.Action.ToLowerInvariant();
+    if (action != "retry" && action != "info" && action != "dismiss")
+        return Results.BadRequest(new { error = "action must be retry, info, or dismiss" });
+
+    var dialogue = failureDialogueStore.Get(id);
+    if (dialogue == null)
+        return Results.NotFound(new { error = "Dialogue not found" });
+
+    var ok = failureDialogueStore.Respond(id, action, body.Info);
+    if (!ok)
+        return Results.BadRequest(new { error = "Dialogue already answered or dismissed" });
+
+    // On retry: reset the task back to QUEUED and start it running again
+    if (action == "retry")
+    {
+        var reset = taskService.ResetForRetry(dialogue.TaskId);
+        if (reset != null)
+        {
+            taskService.StartRun(dialogue.TaskId);
+            return Results.Ok(new
+            {
+                ok       = true,
+                action   = "retry",
+                taskId   = dialogue.TaskId,
+                message  = "המשימה אופסה ותתחיל לרוץ מחדש"
+            });
+        }
+        return Results.Ok(new
+        {
+            ok      = true,
+            action  = "retry",
+            message = "הדיאלוג נענה אך המשימה לא נמצאה לאיפוס"
+        });
+    }
+
+    return Results.Ok(new { ok = true, action, dialogueId = id });
+});
+
 app.MapGet("/tasks/running", () =>
 {
     var runningTasks = taskRunner.GetRunningTasks();
@@ -1542,4 +1620,11 @@ app.Run();
 public class ChatMessageRequest
 {
     public string Message { get; set; } = "";
+}
+
+// ── Phase 24: Recovery respond request model ────────────────────────────────
+public class RecoveryRespondRequest
+{
+    public string  Action { get; set; } = "";   // "retry" | "info" | "dismiss"
+    public string? Info   { get; set; }         // optional user-provided context
 }

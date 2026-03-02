@@ -36,10 +36,11 @@ public class TaskRunner
     private readonly ConcurrentQueue<TraceLogEntry> _traceLogs = new();
     private const int MaxTraceLogs = 500;
     
-    private readonly StorageManager?        _storageManager;
-    private readonly TraceService?          _traceService;        // Phase 19: Observability
-    private readonly SuccessCriteriaEngine? _criteriaEngine;      // Phase 20: Success Criteria
-    private readonly ProcedureStore?        _procedureStore;      // Phase 21: Procedure Memory
+    private readonly StorageManager?          _storageManager;
+    private readonly TraceService?            _traceService;           // Phase 19: Observability
+    private readonly SuccessCriteriaEngine?   _criteriaEngine;         // Phase 20: Success Criteria
+    private readonly ProcedureStore?          _procedureStore;         // Phase 21: Procedure Memory
+    private readonly FailureDialogueStore?    _failureDialogueStore;   // Phase 24: Failure Dialogue
 
     // Separate client for browser calls — longer timeout (Playwright can be slow)
     private readonly HttpClient _browserHttpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
@@ -47,15 +48,17 @@ public class TaskRunner
 
     public TaskRunner(TaskService taskService, Planner planner, HttpClient httpClient,
         StorageManager? storageManager = null, TraceService? traceService = null,
-        SuccessCriteriaEngine? criteriaEngine = null, ProcedureStore? procedureStore = null)
+        SuccessCriteriaEngine? criteriaEngine = null, ProcedureStore? procedureStore = null,
+        FailureDialogueStore? failureDialogueStore = null)
     {
-        _taskService     = taskService;
-        _planner         = planner;
-        _httpClient      = httpClient;
-        _storageManager  = storageManager;
-        _traceService    = traceService;
-        _criteriaEngine  = criteriaEngine;
-        _procedureStore  = procedureStore;
+        _taskService            = taskService;
+        _planner                = planner;
+        _httpClient             = httpClient;
+        _storageManager         = storageManager;
+        _traceService           = traceService;
+        _criteriaEngine         = criteriaEngine;
+        _procedureStore         = procedureStore;
+        _failureDialogueStore   = failureDialogueStore;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
         _netBaseUrl = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
     }
@@ -192,16 +195,19 @@ public class TaskRunner
             try
             {
                 _lastHeartbeat = DateTime.UtcNow;
-                var tickStart = DateTime.UtcNow;
                 var tasksProcessed = 0;
-                
+
                 if (_storageManager != null && !_storageManager.CanAcceptLoad())
                 {
                     AddTrace("WARN", "Storage load limit reached, deferring background runs");
                     await Task.Delay(_runnerIntervalMs, ct);
                     continue;
                 }
-                
+
+                // tickStart is measured AFTER the storage health check (which can be slow)
+                // so the per-tick budget is not consumed by the directory scan.
+                var tickStart = DateTime.UtcNow;
+
                 // Get RUNNING tasks that need processing
                 var runningTasks = _taskService.GetTasks(TaskState.RUNNING)
                     .Where(t => string.IsNullOrEmpty(t.WaitingForApprovalId))
@@ -217,8 +223,11 @@ public class TaskRunner
                         AddTrace("WARN", $"Tick budget exhausted after {tasksProcessed} tasks");
                         break;
                     }
-                    
-                    await ProcessTask(task, ct);
+
+                    // Fire-and-forget: ProcessTask manages its own _executingTasks lock,
+                    // so dispatching without await lets the runner pick up other tasks
+                    // concurrently (e.g. while one task waits for LLM planning).
+                    _ = ProcessTask(task, ct);
                     tasksProcessed++;
                 }
                 
@@ -369,6 +378,14 @@ public class TaskRunner
                         details:  result.Error,
                         outcome:  OutcomeResult.FAILED_VERIFY.ToString(),
                         evidence: result.Error);
+
+                    // Phase 24: open a Failure Dialogue so the user can decide how to recover
+                    _failureDialogueStore?.Create(
+                        taskId:       task.TaskId,
+                        taskTitle:    task.Title,
+                        failedStep:   $"שלב {task.CurrentStep + 1}: {step.Action}",
+                        failedAction: step.Action,
+                        errorMessage: result.Error ?? "Unknown error");
 
                     _taskService.Fail(task.TaskId, $"StepFailed: {step.Action} - {result.Error}");
                     AddTrace("ERROR", $"Step failed: {result.Error}", task.TaskId);

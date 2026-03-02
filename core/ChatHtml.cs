@@ -1,9 +1,10 @@
 namespace Archimedes.Core;
 
 /// <summary>
-/// Phase 22 – Chat UI: Self-contained HTML for the Archimedes chat interface.
+/// Phase 22+24 – Chat UI: Self-contained HTML for the Archimedes chat interface.
 /// Served at GET /chat. No external dependencies — vanilla HTML/CSS/JS only.
-/// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar.
+/// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar,
+///           recovery dialogue cards (Phase 24).
 /// </summary>
 public static class ChatHtml
 {
@@ -250,6 +251,58 @@ public static class ChatHtml
             .spin.on { display: inline-block; }
             @keyframes spin { to { transform: rotate(360deg); } }
 
+            /* ── Recovery dialogue cards (Phase 24) ───────────────────── */
+            #recovery-area {
+              background: #161b22;
+              border-bottom: 1px solid #30363d;
+              padding: 0;
+              flex-shrink: 0;
+              width: 100%;
+              display: none;   /* hidden when no pending dialogues */
+            }
+            #recovery-area.has-items { display: block; }
+            .recovery-card {
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              padding: 10px 16px;
+              border-bottom: 1px solid #21262d;
+            }
+            .recovery-card:last-child { border-bottom: none; }
+            .recovery-header {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              font-size: 0.8rem;
+              color: #f85149;
+              font-weight: 600;
+            }
+            .recovery-task {
+              font-size: 0.75rem;
+              color: #8b949e;
+            }
+            .recovery-question {
+              font-size: 0.88rem;
+              color: #e6edf3;
+              line-height: 1.5;
+            }
+            .recovery-actions {
+              display: flex;
+              gap: 8px;
+            }
+            .rec-btn {
+              font-size: 0.78rem;
+              padding: 4px 12px;
+              border-radius: 6px;
+              border: 1px solid;
+              cursor: pointer;
+              font-family: inherit;
+              transition: opacity .15s;
+            }
+            .rec-btn:hover { opacity: 0.8; }
+            .rec-btn-retry   { background: #1f6feb22; color: #58a6ff; border-color: #1f6feb44; }
+            .rec-btn-dismiss { background: #f8514922; color: #f85149; border-color: #f8514944; }
+
             /* ── Scrollbar ────────────────────────────────────────────── */
             ::-webkit-scrollbar       { width: 5px; }
             ::-webkit-scrollbar-track { background: transparent; }
@@ -266,8 +319,11 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.22.0</span>
+          <span class="version">v0.24.0</span>
         </div>
+
+        <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
+        <div id="recovery-area"></div>
 
         <!-- ── Main layout ───────────────────────────────────────────────── -->
         <!-- First child (chat-area) → RIGHT side in RTL                     -->
@@ -395,6 +451,63 @@ public static class ChatHtml
             } catch { /* silent */ }
           }
 
+          // ── Polling: recovery dialogues (Phase 24) ──────────────────────
+          async function pollRecovery() {
+            try {
+              const r = await fetch('/recovery-dialogues');
+              if (!r.ok) return;
+              const d    = await r.json();
+              const area = document.getElementById('recovery-area');
+
+              if (!d.dialogues || d.dialogues.length === 0) {
+                area.innerHTML = '';
+                area.classList.remove('has-items');
+                return;
+              }
+
+              area.classList.add('has-items');
+              area.innerHTML = d.dialogues.map(dl => `
+                <div class="recovery-card" data-id="${esc(dl.dialogueId)}">
+                  <div class="recovery-header">
+                    ⚠ שחזור משימה
+                  </div>
+                  <div class="recovery-task">📋 ${esc(dl.taskTitle || dl.taskId)}</div>
+                  <div class="recovery-question">${esc(dl.recoveryQuestion)}</div>
+                  <div class="recovery-actions">
+                    <button class="rec-btn rec-btn-retry"
+                            onclick="recoverRespond('${esc(dl.dialogueId)}','retry')">
+                      ↺ נסה שוב
+                    </button>
+                    <button class="rec-btn rec-btn-dismiss"
+                            onclick="recoverRespond('${esc(dl.dialogueId)}','dismiss')">
+                      ✕ בטל
+                    </button>
+                  </div>
+                </div>`).join('');
+            } catch { /* silent */ }
+          }
+
+          async function recoverRespond(dialogueId, action) {
+            try {
+              const r = await fetch('/recovery-dialogues/' + dialogueId + '/respond', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ action })
+              });
+              const d = await r.json();
+              if (d.ok) {
+                const msg = action === 'retry'
+                  ? '↺ המשימה הופעלה מחדש'
+                  : '✕ המשימה בוטלה';
+                appendMsg(msg, 'msg-system');
+                pollRecovery();   // refresh immediately
+                pollTasks();
+              }
+            } catch {
+              appendMsg('שגיאה בשחזור המשימה', 'msg-system');
+            }
+          }
+
           // ── Chat ─────────────────────────────────────────────────────────
           function appendMsg(html, cls) {
             const msgs = document.getElementById('messages');
@@ -455,9 +568,10 @@ public static class ChatHtml
           });
 
           // ── Start polling ────────────────────────────────────────────────
-          pollMetrics(); setInterval(pollMetrics,  5000);
-          pollTasks();   setInterval(pollTasks,    3000);
-          pollStatus();  setInterval(pollStatus,   2000);
+          pollMetrics();   setInterval(pollMetrics,   5000);
+          pollTasks();     setInterval(pollTasks,     3000);
+          pollStatus();    setInterval(pollStatus,    2000);
+          pollRecovery();  setInterval(pollRecovery,  4000);  // Phase 24
         </script>
 
         </body>

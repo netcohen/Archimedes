@@ -1798,14 +1798,23 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
-### Phase 24 - Failure Dialogue
+### Phase 24 - Failure Dialogue ✅
 
 **What:** A failure becomes a conversation, not a dead end.
 
-- Reads the execution graph (Phase 19) to reconstruct what was attempted
-- Explains in natural language: what was tried and why it failed
-- Asks exactly one focused question
-- User answer updates the procedure and triggers retry
+**Done:**
+- `FailureDialogue.cs` — `DialogueStatus` enum, `FailureDialogue` model, `FailureDialogueStore` (in-memory + JSON disk)
+- `FailureAnalyzer.cs` — rule-based Hebrew recovery questions (session expired, timeout, 404, DOM, 403, 429, server error, CAPTCHA, default)
+- `TaskRunner.cs` — creates `FailureDialogue` on any step failure (before marking task FAILED)
+- `TaskService.cs` — added `ResetForRetry()`: FAILED → QUEUED, preserves CurrentStep
+- `Program.cs` — `GET /recovery-dialogues`, `POST /recovery-dialogues/{id}/respond` (retry/dismiss/info)
+- `ChatHtml.cs` — `#recovery-area` div, `pollRecovery()` every 4s, `recoverRespond()`, version v0.24.0
+- `TaskRunner.cs` — bug fix: moved `tickStart` to after `StorageManager.CanAcceptLoad()` (dir scan was consuming tick budget)
+- `TaskRunner.cs` — concurrent dispatch: `_ = ProcessTask(task, ct)` so slow LLM tasks don't block others
+- `scripts/phase24-ready-gate.ps1` — 43/43 PASS
+
+**Gate result:** 43/43 PASS
+**Regression:** phase19 26/26, phase20 22/22, phase21 25/25, phase22 29/29, phase23 33/33
 
 ---
 

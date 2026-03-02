@@ -233,14 +233,34 @@ public class TaskService
     {
         var task = _store.GetTask(taskId);
         if (task == null) return null;
-        
+
         task.State = TaskState.FAILED;
         task.Error = error;
         task.UpdatedAtUtc = DateTime.UtcNow;
-        
+
         _store.SaveTask(task);
         ArchLogger.LogInfo($"Task failed: id={taskId} error={Redactor.Redact(error)}");
-        
+
+        return task;
+    }
+
+    /// <summary>
+    /// Phase 24 — Reset a FAILED task back to QUEUED so it can be retried.
+    /// Keeps CurrentStep so execution resumes from the failed step (not from scratch).
+    /// </summary>
+    public AgentTask? ResetForRetry(string taskId)
+    {
+        var task = _store.GetTask(taskId);
+        if (task == null) return null;
+        if (task.State != TaskState.FAILED) return null;
+
+        task.State        = TaskState.QUEUED;
+        task.Error        = null;
+        task.UpdatedAtUtc = DateTime.UtcNow;
+        // CurrentStep intentionally preserved — retry from the step that failed
+
+        _store.SaveTask(task);
+        ArchLogger.LogInfo($"Task reset for retry from step {task.CurrentStep}: id={taskId}");
         return task;
     }
     
