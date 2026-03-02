@@ -162,10 +162,23 @@ public class TraceService
     /// <summary>
     /// Phase 22 – Chat UI: Returns the most recent in-flight step name and endpoint,
     /// or null if nothing is currently active.
+    /// Excludes polling/housekeeping endpoints so the status bar shows only real work.
     /// </summary>
     public (string Endpoint, string StepName)? GetLatestActivity()
     {
+        // These endpoints are polled constantly by the UI — exclude them from "activity"
+        // Note: "/chat/message" is intentionally NOT excluded — it's real user-driven work
+        static bool IsNoise(string ep) =>
+            ep == "/status/current"          ||
+            ep == "/system/metrics"          ||
+            ep == "/health"                  ||
+            ep == "/tasks"                   ||
+            ep == "/chat"                    ||
+            ep.StartsWith("/traces")         ||
+            ep.StartsWith("/procedures");
+
         var active = _active.Values
+            .Where(t => !IsNoise(t.Endpoint))
             .OrderByDescending(t => t.StartedAtUtc)
             .FirstOrDefault();
 
