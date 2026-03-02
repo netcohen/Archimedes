@@ -1754,16 +1754,27 @@ worked, and can move between machines while continuing to develop itself.
 
 ---
 
-### Phase 22 - Chat UI
+### Phase 22 - Chat UI ✅ Complete
 
 **What:** A clean chat interface on the screen — the primary way to interact with Archimedes.
 
-- Web-based chat served by Core at GET /chat (vanilla HTML/JS, no external dependencies)
-- Full Hebrew RTL support (CSS direction: rtl)
-- Text only — no file attachments
-- Chromium kiosk mode on Ubuntu: machine boots directly into the chat
-- POST /chat/message endpoint routes input to LLM + task engine
-- Auto-start: systemd service for Core + Chromium autostart on login
+**Delivered:**
+- `GET /chat` — self-contained HTML/CSS/JS page (no external dependencies), 13KB
+- Full Hebrew RTL support (`dir="rtl"`, `direction: rtl`)
+- Chat area: user messages (right), system messages (left), intent chip badge
+- Top metrics bar: CPU%, RAM used/total, uptime — polling every 5s via `GET /system/metrics`
+- Tasks panel (left sidebar): live list of Running/Pending tasks — polling every 3s via `GET /tasks`
+- Status bar: spinner + description of what Archimedes is currently doing — polling every 2s via `GET /status/current`
+- `POST /chat/message` — routes message → LLM interpret → creates+starts task if intent supported
+- `GET /system/metrics` — process CPU%, RAM, uptime
+- `GET /status/current` — driven by active TraceService traces; Hebrew descriptions per step
+
+**New files:**
+- `core/ChatHtml.cs` — static HTML page as C# 11 raw string literal
+- `core/SystemMetricsHelper.cs` — CPU sampler + RAM + uptime
+- `scripts/phase22-ready-gate.ps1` — 29 tests
+
+**Gate result:** 29/29 PASS
 
 **Why here:** Procedure Memory (Phase 21) gives Archimedes something useful to say.
 The Chat UI is how the user interacts with that capability directly.

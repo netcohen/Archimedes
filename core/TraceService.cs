@@ -159,6 +159,30 @@ public class TraceService
     /// <summary>Total completed traces in the in-memory buffer.</summary>
     public int CompletedCount => _completed.Count;
 
+    /// <summary>
+    /// Phase 22 – Chat UI: Returns the most recent in-flight step name and endpoint,
+    /// or null if nothing is currently active.
+    /// </summary>
+    public (string Endpoint, string StepName)? GetLatestActivity()
+    {
+        var active = _active.Values
+            .OrderByDescending(t => t.StartedAtUtc)
+            .FirstOrDefault();
+
+        if (active == null) return null;
+
+        TraceStep? lastStep;
+        lock (active.Steps)
+        {
+            // Prefer the last open (incomplete) step; fall back to the last step overall
+            lastStep = active.Steps.LastOrDefault(s => s.CompletedAtUtc == null)
+                    ?? active.Steps.LastOrDefault();
+        }
+
+        if (lastStep == null) return (active.Endpoint, "");
+        return (active.Endpoint, lastStep.Name);
+    }
+
     // ── Disk helpers ─────────────────────────────────────────────────────────
 
     private void PersistToDisk(ExecutionTrace trace)

@@ -792,6 +792,113 @@ app.MapGet("/task/{id}/outcome", (string id) =>
     });
 });
 
+// ── Phase 22: Chat UI ─────────────────────────────────────────────────────────
+
+// GET /chat — serve the self-contained chat interface
+app.MapGet("/chat", () =>
+    Results.Content(ChatHtml.Page, "text/html; charset=utf-8"));
+
+// GET /system/metrics — CPU, RAM, uptime for the top bar
+app.MapGet("/system/metrics", () =>
+    Results.Json(new
+    {
+        cpuPercent    = SystemMetricsHelper.GetCpuPercent(),
+        ramUsedMb     = SystemMetricsHelper.GetRamUsedMb(),
+        ramTotalMb    = SystemMetricsHelper.GetRamTotalMb(),
+        uptimeSeconds = SystemMetricsHelper.GetUptimeSeconds()
+    }));
+
+// GET /status/current — what Archimedes is doing right now (driven by active traces)
+app.MapGet("/status/current", () =>
+{
+    var activity = traceService.GetLatestActivity();
+    if (activity == null)
+        return Results.Json(new { active = false, endpoint = (string?)null, step = (string?)null, description = (string?)null });
+
+    var (endpoint, stepName) = activity.Value;
+    var description = stepName switch
+    {
+        "LLM.Interpret" => "מנתח intent...",
+        "Planner.Plan"  => "בונה תוכנית ביצוע...",
+        "Task.Execute"  => "מבצע משימה...",
+        _               => !string.IsNullOrEmpty(stepName) ? stepName : "עובד..."
+    };
+
+    return Results.Json(new
+    {
+        active      = true,
+        endpoint,
+        step        = stepName,
+        description
+    });
+});
+
+// POST /chat/message — routes a user message through LLM → optionally creates a task
+app.MapPost("/chat/message", async (HttpRequest req) =>
+{
+    using var sr   = new StreamReader(req.Body);
+    var body       = await sr.ReadToEndAsync();
+    var chatReq    = JsonSerializer.Deserialize<ChatMessageRequest>(
+        body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+    if (chatReq == null || string.IsNullOrWhiteSpace(chatReq.Message))
+        return Results.BadRequest("message required");
+
+    var corrId = Guid.NewGuid().ToString("N")[..12];
+    traceService.Begin(corrId, "/chat/message", "POST");
+    traceService.BeginStep(corrId, "LLM.Interpret");
+
+    try
+    {
+        var result = await llmAdapter.Interpret(chatReq.Message);
+        var fc     = result.IsHeuristicFallback ? FailureCode.INTENT_AMBIGUOUS : FailureCode.None;
+        traceService.CompleteStep(corrId, "LLM.Interpret", true, fc,
+            $"intent={result.Intent} confidence={result.Confidence:F2}");
+
+        var intent     = result.Intent ?? "UNKNOWN";
+        var confidence = result.Confidence;
+
+        string   reply;
+        string?  taskId = null;
+
+        var supported = new[] { "TESTSITE_EXPORT", "TESTSITE_MONITOR", "LOGIN_FLOW", "FILE_DOWNLOAD" };
+
+        if (supported.Contains(intent))
+        {
+            var task = taskService.CreateTask(new CreateTaskRequest
+            {
+                Title      = chatReq.Message.Length > 50
+                    ? chatReq.Message[..50] + "…"
+                    : chatReq.Message,
+                UserPrompt = chatReq.Message
+            });
+            taskService.StartRun(task.TaskId);
+            taskId = task.TaskId;
+            reply  = $"זיהיתי: {intent} (ביטחון: {confidence:P0})\nיצרתי משימה ומריץ אותה.";
+        }
+        else
+        {
+            reply = $"זיהיתי כוונה: {intent} (ביטחון: {confidence:P0})\n" +
+                    $"פעולה זו עדיין לא נתמכת.\n" +
+                    $"Intent נתמכים: {string.Join(", ", supported)}";
+        }
+
+        traceService.Complete(corrId, true);
+        return Results.Json(new { reply, intent, taskId });
+    }
+    catch (Exception ex)
+    {
+        traceService.CompleteStep(corrId, "LLM.Interpret", false, FailureCode.LLM_INFERENCE_ERROR, ex.Message);
+        traceService.Complete(corrId, false);
+        return Results.Json(new
+        {
+            reply  = "שגיאה פנימית: " + ex.Message,
+            intent = (string?)null,
+            taskId = (string?)null
+        });
+    }
+});
+
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────
 
 // List all stored procedures
@@ -1430,3 +1537,9 @@ app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
 app.Lifetime.ApplicationStopping.Register(() => llmAdapter.Dispose());
 app.Run();
+
+// ── Phase 22: Chat request model ───────────────────────────────────────────
+public class ChatMessageRequest
+{
+    public string Message { get; set; } = "";
+}
