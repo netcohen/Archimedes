@@ -1781,29 +1781,6 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
-### [PLACEHOLDER] Autonomous Improvement Loop
-
-> **סטטוס:** ממתין לתשתית — אין לבנות עדיין.
->
-> **תלויות נדרשות לפני בנייה:**
-> - Phase 25 (Failure Dialogue) — כדי לדעת *מה* שבור ולמה
-> - Phase 27 (Integrations) — כדי שיהיה data אמיתי לנתח
-> - Phase 29 (Self-Dev) — כדי שהשיפור יוכל לשנות קוד בפועל
->
-> **מה יהיה בשלב זה:**
-> - Background loop ב-SmartScheduler שרץ כל N דקות
-> - מנתח traces אחרונים: pattern של כישלונות לפי intent / step
-> - מכייל ספי keyword scoring ב-ProcedureStore לפי outcomes
-> - בודק procedures ישנות ומסמן stale לפי failure-rate
-> - מדווח לשורת הסטטוס בצ'אט: "מנתח 3 כישלונות ב-TESTSITE_EXPORT..."
-> - תוצאות: הצעות לדיאלוג כישלון + עדכון אוטומטי של procedure scoring
->
-> **הסיבה שלא נבנה עכשיו:**
-> בלי Failure Dialogue ו-Integrations, הלופ יוכל לנתח אבל לא לפעול.
-> זה יוצר תצוגה בלי עומק — מבנה לפני תצוגה דורש שהמבנה יהיה שלם קודם.
-
----
-
 ### Phase 23 - Linux Port + Deployment
 
 **What:** Archimedes runs natively on Ubuntu 24.04 LTS — the dedicated deployment OS.
@@ -1886,3 +1863,28 @@ Only here - because by Phase 27 the system has judgment, memory, and failure rec
 - Generates APK updates
 - Installs via ADB / developer mode
 - App UI grows alongside system capabilities
+
+---
+
+### Phase 30 - Autonomous Improvement Loop
+
+**What:** Archimedes מנתח את עצמו ברקע ומשפר את ביצועיו ללא התערבות משתמש.
+
+**תלויות — לא לבנות לפני שכל אלה קיימים:**
+- Phase 24 (Failure Dialogue) — מספק את השפה לתקשר כישלונות
+- Phase 27 (Integrations) — מייצר data אמיתי ומגוון לניתוח
+- Phase 29 (Self-Dev) — מאפשר לשיפורים לשנות קוד בפועל
+
+**מה ייבנה:**
+- Background loop ב-SmartScheduler — רץ כל N דקות בלי להפריע
+- ניתוח patterns: מזהה כישלונות חוזרים לפי intent / step / selector
+- כיול keyword scoring ב-ProcedureStore לפי outcomes מצטברים
+- סימון procedures ישנות כ-stale לפי failure-rate גולש
+- תוצאות מדווחות לשורת הסטטוס בצ'אט ב-real time
+- הצעות אוטומטיות לדיאלוג כישלון (Phase 24) כשמזוהה pattern
+
+**למה Phase 30 ולא מוקדם יותר:**
+בלי Failure Dialogue הלופ לא יודע *מה* לתקן.
+בלי Integrations אין מספיק data כדי שהניתוח יהיה משמעותי.
+בלי Self-Dev השיפור נעצר בהמלצות — לא ביישום.
+מבנה לפני תצוגה.
