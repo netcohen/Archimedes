@@ -1818,14 +1818,28 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
-### Phase 25 - Availability Engine
+### Phase 25 - Availability Engine ✅
 
 **What:** The system learns when the user is available and acts accordingly.
 
-- Learns availability patterns from non-response (Shabbat, sleep hours)
-- Sensitive information waits for an availability window before acting
-- Firebase data deleted immediately after read
-- Override layer: critical situations always notify regardless of availability
+**Done:**
+- `AvailabilityStore.cs` — JSON-persisted patterns (sleepStart/End, shabbatDetected, manualOverride, interaction history up to 200 records)
+- `AvailabilityEngine.cs` — availability logic: sleep-hour detection, Shabbat window (Fri 17:00–Sat 21:00), manualOverride bypass, `ShouldDelay(actionKind, critical)` — only THIRD_PARTY_MESSAGE is ever delayed; critical tasks always proceed
+- `Program.cs` — 5 new endpoints: `GET /availability/status`, `GET /availability/patterns`, `POST /availability/interaction`, `POST /availability/patterns`, `POST /availability/should-delay`
+- `Program.cs` — chat messages automatically call `RecordInteraction("chat")` so availability engine learns from live usage
+- `ChatHtml.cs` — version bumped to v0.25.0
+- `Planner.cs` — `ResolveTestsiteUrl()` rejects LLM-hallucinated placeholder URLs (example.com, testsitetest.com) for TESTSITE_* intents
+- `scripts/phase14-e2e.ps1` + `scripts/e2e.ps1` — fixed ambiguous prompts that caused TESTSITE_EXPORT to be misclassified
+- `scripts/phase25-ready-gate.ps1` — 24/24 PASS
+
+**Authorization model (agreed):**
+- Archimedes operates autonomously — no permission needed per action
+- Iron rule: never send messages to third parties without explicit user instruction
+- Critical tasks always proceed regardless of availability
+- Standing orders (e.g., "every Wednesday send X") count as explicit authorization
+
+**Gate result:** 24/24 PASS
+**Regression:** phase16 PASS, phase17 7/7, phase18 8/8, phase19 26/26, phase20 22/22, phase21 25/25, phase22 29/29, phase23 33/33, phase24 43/43
 
 ---
 

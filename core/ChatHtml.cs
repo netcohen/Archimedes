@@ -319,7 +319,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.24.0</span>
+          <span class="version">v0.25.0</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->

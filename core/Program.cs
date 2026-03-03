@@ -37,6 +37,10 @@ var procedureStore = new ProcedureStore();
 // Phase 24: Failure Dialogue
 var failureDialogueStore = new FailureDialogueStore();
 
+// Phase 25: Availability Engine
+var availabilityStore  = new AvailabilityStore();
+var availabilityEngine = new AvailabilityEngine(availabilityStore);
+
 var planner = new Planner(llmAdapter, policyEngine, procedureStore);
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
@@ -847,6 +851,9 @@ app.MapPost("/chat/message", async (HttpRequest req) =>
     if (chatReq == null || string.IsNullOrWhiteSpace(chatReq.Message))
         return Results.BadRequest("message required");
 
+    // Phase 25: record user interaction so availability engine can learn patterns
+    availabilityEngine.RecordInteraction("chat");
+
     var corrId = Guid.NewGuid().ToString("N")[..12];
     traceService.Begin(corrId, "/chat/message", "POST");
     traceService.BeginStep(corrId, "LLM.Interpret");
@@ -961,6 +968,77 @@ app.MapDelete("/procedures/{id}", (string id) =>
 });
 
 // ── Phase 24: Failure Dialogue ────────────────────────────────────────────────
+
+// ── Phase 25: Availability Engine endpoints ──────────────────────────────────
+
+// GET /availability/status — current user availability
+app.MapGet("/availability/status", () =>
+{
+    var status = availabilityEngine.GetStatus();
+    return Results.Json(new
+    {
+        isAvailable        = status.IsAvailable,
+        reason             = status.Reason,
+        nextWindowUtc      = status.NextWindowUtc,
+        lastInteractionUtc = status.LastInteractionUtc
+    });
+});
+
+// GET /availability/patterns — learned patterns
+app.MapGet("/availability/patterns", () =>
+{
+    var p = availabilityEngine.GetPattern();
+    return Results.Json(new
+    {
+        sleepStartHour     = p.SleepStartHour,
+        sleepEndHour       = p.SleepEndHour,
+        shabbatDetected    = p.ShabbatDetected,
+        manualOverride     = p.ManualOverride,
+        lastInteractionUtc = p.LastInteractionUtc,
+        interactionCount   = p.RecentInteractions.Count,
+        updatedAt          = p.UpdatedAt
+    });
+});
+
+// POST /availability/interaction — record a user interaction
+app.MapPost("/availability/interaction", (HttpRequest req) =>
+{
+    var source = req.Query.TryGetValue("source", out var s) ? s.ToString() : "api";
+    availabilityEngine.RecordInteraction(source);
+    return Results.Json(new { recorded = true, source });
+});
+
+// POST /availability/patterns — manually update patterns
+app.MapPost("/availability/patterns", async (HttpRequest req) =>
+{
+    using var reader = new StreamReader(req.Body);
+    var body = await reader.ReadToEndAsync();
+    try
+    {
+        var doc = System.Text.Json.JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        var sleepStart     = root.TryGetProperty("sleepStartHour",  out var ss)  ? ss.GetInt32()   : availabilityEngine.GetPattern().SleepStartHour;
+        var sleepEnd       = root.TryGetProperty("sleepEndHour",    out var se)  ? se.GetInt32()   : availabilityEngine.GetPattern().SleepEndHour;
+        var shabbat        = root.TryGetProperty("shabbatDetected", out var sh)  ? sh.GetBoolean() : availabilityEngine.GetPattern().ShabbatDetected;
+        var manualOverride = root.TryGetProperty("manualOverride",  out var mo)  ? mo.GetBoolean() : availabilityEngine.GetPattern().ManualOverride;
+        availabilityEngine.UpdatePattern(sleepStart, sleepEnd, shabbat, manualOverride);
+        return Results.Json(new { updated = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+// POST /availability/should-delay?action=X&critical=false — check if action should be delayed
+app.MapPost("/availability/should-delay", (HttpRequest req) =>
+{
+    var action   = req.Query.TryGetValue("action",   out var a) ? a.ToString() : "";
+    var critical = req.Query.TryGetValue("critical",  out var c) && c == "true";
+    var delay    = availabilityEngine.ShouldDelay(action, critical);
+    var status   = availabilityEngine.GetStatus();
+    return Results.Json(new { shouldDelay = delay, reason = status.Reason, isAvailable = status.IsAvailable });
+});
 
 // GET /recovery-dialogues — list all pending recovery dialogues (polled by Chat UI)
 app.MapGet("/recovery-dialogues", () =>
