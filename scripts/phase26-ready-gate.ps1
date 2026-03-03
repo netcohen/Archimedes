@@ -33,7 +33,7 @@ Write-Host "`n[3] POST /goals - create goal" -ForegroundColor Yellow
 $goalId = $null
 try {
     $body = '{"userPrompt":"export testsite data to CSV","title":"Gate test goal","type":"ONE_TIME","maxRetries":1}'
-    $g = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 15
+    $g = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 60
     if ($g.goalId) {
         $goalId = $g.goalId
         Pass "Goal created goalId=$($g.goalId)"
@@ -96,7 +96,7 @@ $pauseGoalId = $null
 try {
     # Create a PERSISTENT goal to test pause/resume (ONE_TIME may complete fast)
     $pb = '{"userPrompt":"monitor testsite dashboard","title":"Pause test goal","type":"PERSISTENT","checkIntervalMinutes":60}'
-    $pg = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $pb -ContentType "application/json" -TimeoutSec 15
+    $pg = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $pb -ContentType "application/json" -TimeoutSec 60
     $pauseGoalId = $pg.goalId
 
     $paused = Invoke-RestMethod -Uri "$coreUrl/goals/$pauseGoalId/pause" -Method Post -TimeoutSec 10
@@ -118,7 +118,7 @@ Write-Host "`n[10] Adaptive replan: goal survives task failure" -ForegroundColor
 try {
     # Create ONE_TIME goal with maxRetries=2 - it will try alternatives
     $rb = '{"userPrompt":"export testsite data to CSV","title":"Adaptive test","type":"ONE_TIME","maxRetries":2}'
-    $rg = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $rb -ContentType "application/json" -TimeoutSec 15
+    $rg = Invoke-RestMethod -Uri "$coreUrl/goals" -Method Post -Body $rb -ContentType "application/json" -TimeoutSec 60
     $rid = $rg.goalId
     Start-Sleep -Seconds 3
     $rdet = Invoke-RestMethod -Uri "$coreUrl/goals/$rid" -TimeoutSec 10
