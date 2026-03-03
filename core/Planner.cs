@@ -181,7 +181,7 @@ public class Planner
     private List<PlanStep> BuildTestsiteExportSteps(Dictionary<string, object> slots, PolicyEvaluationResult policy)
     {
         var steps = new List<PlanStep>();
-        var baseUrl = slots.ContainsKey("url") ? slots["url"]?.ToString() : "http://localhost:5052";
+        var baseUrl = ResolveTestsiteUrl(slots);
         
         // If approval required, add approval step at the beginning
         if (policy.Decision == PolicyDecision.REQUIRE_APPROVAL)
@@ -227,7 +227,7 @@ public class Planner
     private List<PlanStep> BuildTestsiteMonitorSteps(Dictionary<string, object> slots, PolicyEvaluationResult policy)
     {
         var steps = new List<PlanStep>();
-        var baseUrl = slots.ContainsKey("url") ? slots["url"]?.ToString() : "http://localhost:5052";
+        var baseUrl = ResolveTestsiteUrl(slots);
         var interval = slots.ContainsKey("intervalMs") ? Convert.ToInt32(slots["intervalMs"]) : 30000;
         
         // Request approval if needed
@@ -353,6 +353,27 @@ public class Planner
         return steps;
     }
     
+    // Placeholder domains that the LLM hallucinates when no real URL is in the prompt
+    private static readonly HashSet<string> _placeholderHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "example.com", "testsitetest.com", "localhost", "test.com", "sample.com", "placeholder.com"
+    };
+
+    private static string ResolveTestsiteUrl(Dictionary<string, object> slots)
+    {
+        if (slots.TryGetValue("url", out var raw) && raw is string urlStr && !string.IsNullOrWhiteSpace(urlStr))
+        {
+            try
+            {
+                var uri = new Uri(urlStr);
+                if (!_placeholderHosts.Contains(uri.Host))
+                    return urlStr.TrimEnd('/');
+            }
+            catch { }
+        }
+        return "http://localhost:5052";
+    }
+
     private string GetDomainForIntent(string intent, Dictionary<string, object>? slots)
     {
         // Extract domain from slots if available

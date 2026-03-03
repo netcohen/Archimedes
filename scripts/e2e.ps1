@@ -108,7 +108,7 @@ try {
 Write-Host "`n[3] Task Lifecycle" -ForegroundColor Yellow
 
 # Create task
-$createBody = '{"Title":"E2E Test Task","UserPrompt":"Login to the local testsite and download the CSV, then summarize the first 3 rows."}'
+$createBody = '{"Title":"E2E Test Task","UserPrompt":"export testsite data to CSV and summarize the first 3 rows"}'
 try {
     $createResponse = Invoke-RestMethod -Uri "$coreUrl/task" -Method POST -Body $createBody -ContentType "application/json"
     $taskId = $createResponse.taskId
@@ -259,7 +259,7 @@ Write-Host "`n[7] Concurrent Tasks" -ForegroundColor Yellow
 
 $concurrentTasks = @()
 for ($i = 1; $i -le 3; $i++) {
-    $body = "{`"Title`":`"Concurrent $i`",`"UserPrompt`":`"Login to testsite and download CSV $i`"}"
+    $body = "{`"Title`":`"Concurrent $i`",`"UserPrompt`":`"export testsite CSV data batch $i`"}"
     try {
         $task = Invoke-RestMethod -Uri "$coreUrl/task" -Method POST -Body $body -ContentType "application/json"
         Invoke-RestMethod -Uri "$coreUrl/task/$($task.taskId)/run" -Method POST | Out-Null

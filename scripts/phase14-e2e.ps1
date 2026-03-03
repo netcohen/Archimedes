@@ -106,7 +106,7 @@ try {
 # Test 4: Planner
 Write-Host "`n[4] Planner" -ForegroundColor Yellow
 try {
-    $planBody = '{"UserPrompt":"Download CSV from testsite"}'
+    $planBody = '{"UserPrompt":"export testsite data to CSV"}'
     $plan = Invoke-RestMethod -Uri "$coreUrl/planner/plan" -Method Post -Body $planBody -ContentType "application/json"
     
     if ($plan.success -and $plan.intent -eq "TESTSITE_EXPORT") {
