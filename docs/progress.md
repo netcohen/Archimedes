@@ -1843,14 +1843,31 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
-### Phase 26 - Goal Layer + Adaptive Planner
+### Phase 26 - Goal Layer + Adaptive Planner ✅
 
 **What:** Moves from executing tasks to pursuing goals.
 
-- Goal abstraction above task level ("maintain price below X" not "check price now")
-- When a step fails: finds alternative path toward the goal
-- ACTIVE / MONITORING / IDLE state management per goal
-- Smart resource allocation across concurrent goals
+**Done:**
+- `Goal.cs` — GoalState (ACTIVE/MONITORING/IDLE/COMPLETED/FAILED), GoalType (PERSISTENT/CONDITION/ONE_TIME), GoalMemory (up to 100 entries, accumulated context across runs), GoalCheckpoint (Phase 28 migration support)
+- `GoalStore.cs` — JSON persistence to `%LOCALAPPDATA%\Archimedes\goals.json`, thread-safe CRUD
+- `GoalEngine.cs` — CreateAsync (LLM intent detection), Evaluate (isAchieved + nextAction), AdvanceAsync (task status check + spawn), Adaptive replanning (2 alternatives per cycle, back-off on retry, escalates to FailureDialogue), Pause/Resume, Checkpoint
+- `GoalRunner.cs` — background loop every 30s, concurrent WhenAll across all active goals, follows SmartScheduler Start() pattern
+- `Program.cs` — 8 new endpoints: POST/GET /goals, GET/DELETE /goals/{id}, POST /goals/{id}/pause|resume|evaluate, GET /goals/{id}/tasks; chat message handler detects "מטרה"/"goal" keywords and creates goal instead of task
+- `ChatHtml.cs` — v0.26.0, Goals section in sidebar with state badges + progress bar, pollGoals() every 5s
+- `scripts/phase26-ready-gate.ps1` — 12 test sections
+
+**Adaptive replanning algorithm:**
+- Task fails → try 2 alternatives (prompt enriched with failure context)
+- After 2 alternatives: retryCount++, 5-minute back-off in MONITORING state
+- After MaxRetries: escalate to FailureDialogue (Phase 24 integration) + FAILED state
+
+**Goal memory:**
+- Accumulates history of all task runs (success/failure, summary, observed values)
+- Enriches future prompts with lastObservedValue
+- Checkpoint snapshot for Phase 28 migration support
+
+**Gate result:** 24/24 PASS
+**Regression:** phase25 ok, phase19 X-Correlation-Id ok, chat v0.26.0
 
 ---
 

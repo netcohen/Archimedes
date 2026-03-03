@@ -42,6 +42,12 @@ var availabilityStore  = new AvailabilityStore();
 var availabilityEngine = new AvailabilityEngine(availabilityStore);
 
 var planner = new Planner(llmAdapter, policyEngine, procedureStore);
+
+// Phase 26: Goal Layer + Adaptive Planner
+var goalStore  = new GoalStore();
+var goalEngine = new GoalEngine(goalStore, taskService, llmAdapter, availabilityEngine, failureDialogueStore);
+var goalRunner = new GoalRunner(goalStore, goalEngine);
+goalRunner.Start();
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
 
@@ -869,11 +875,27 @@ app.MapPost("/chat/message", async (HttpRequest req) =>
         var confidence = result.Confidence;
 
         string   reply;
-        string?  taskId = null;
+        string?  taskId  = null;
+        string?  goalId  = null;
 
         var supported = new[] { "TESTSITE_EXPORT", "TESTSITE_MONITOR", "LOGIN_FLOW", "FILE_DOWNLOAD" };
 
-        if (supported.Contains(intent))
+        // Phase 26: detect goal-creation requests by keywords
+        var msg = chatReq.Message;
+        bool isGoalRequest =
+            msg.Contains("מטרה", StringComparison.OrdinalIgnoreCase)  ||
+            msg.Contains("תמיד", StringComparison.OrdinalIgnoreCase)  ||
+            msg.Contains("כל שעה", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("goal", StringComparison.OrdinalIgnoreCase)  ||
+            msg.Contains("monitor", StringComparison.OrdinalIgnoreCase) && msg.Contains("continuously", StringComparison.OrdinalIgnoreCase);
+
+        if (isGoalRequest)
+        {
+            var goal = await goalEngine.CreateAsync(new CreateGoalRequest { UserPrompt = msg });
+            goalId = goal.GoalId;
+            reply  = $"יצרתי מטרה חדשה: \"{goal.Title}\"\nזיהיתי: {goal.Intent} | מזהה: {goal.GoalId}";
+        }
+        else if (supported.Contains(intent))
         {
             var task = taskService.CreateTask(new CreateTaskRequest
             {
@@ -894,7 +916,7 @@ app.MapPost("/chat/message", async (HttpRequest req) =>
         }
 
         traceService.Complete(corrId, true);
-        return Results.Json(new { reply, intent, taskId });
+        return Results.Json(new { reply, intent, taskId, goalId });
     }
     catch (Exception ex)
     {
@@ -1688,10 +1710,168 @@ app.MapPost("/store/test", async (HttpRequest req) =>
     });
 });
 
+// ── Phase 26: Goal Layer ────────────────────────────────────────────────────────
+
+// POST /goals — create a new goal
+app.MapPost("/goals", async (HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    var createReq = JsonSerializer.Deserialize<CreateGoalRequest>(
+        body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+    if (createReq == null || string.IsNullOrWhiteSpace(createReq.UserPrompt))
+        return Results.BadRequest("userPrompt required");
+
+    try
+    {
+        var goal = await goalEngine.CreateAsync(createReq);
+        return Results.Json(new
+        {
+            goalId   = goal.GoalId,
+            title    = goal.Title,
+            state    = goal.State.ToString(),
+            type     = goal.Type.ToString(),
+            intent   = goal.Intent,
+            taskIds  = goal.TaskIds,
+            createdAt = goal.CreatedAtUtc
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+// GET /goals — list all goals
+app.MapGet("/goals", () =>
+{
+    var all = goalStore.GetAll();
+    return Results.Json(new
+    {
+        count = all.Count,
+        goals = all.Select(g => new
+        {
+            goalId    = g.GoalId,
+            title     = g.Title,
+            state     = g.State.ToString(),
+            type      = g.Type.ToString(),
+            intent    = g.Intent,
+            progress  = Math.Round(g.Progress, 2),
+            taskCount = g.TaskIds.Count,
+            retryCount = g.RetryCount,
+            createdAt  = g.CreatedAtUtc,
+            updatedAt  = g.UpdatedAtUtc,
+            nextCheckUtc = g.NextCheckUtc
+        })
+    });
+});
+
+// GET /goals/{id} — goal detail
+app.MapGet("/goals/{id}", (string id) =>
+{
+    var g = goalStore.GetById(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found" });
+    return Results.Json(new
+    {
+        goalId           = g.GoalId,
+        title            = g.Title,
+        description      = g.Description,
+        state            = g.State.ToString(),
+        type             = g.Type.ToString(),
+        intent           = g.Intent,
+        successCondition = g.SuccessCondition,
+        progress         = Math.Round(g.Progress, 2),
+        taskIds          = g.TaskIds,
+        currentTaskId    = g.CurrentTaskId,
+        retryCount       = g.RetryCount,
+        maxRetries       = g.MaxRetries,
+        interactionCount = g.Memory.TotalRuns,
+        successCount     = g.Memory.SuccessCount,
+        lastObservedValue = g.Memory.LastObservedValue,
+        failureReason    = g.FailureReason,
+        createdAt        = g.CreatedAtUtc,
+        updatedAt        = g.UpdatedAtUtc,
+        completedAt      = g.CompletedAtUtc,
+        nextCheckUtc     = g.NextCheckUtc,
+        hasCheckpoint    = g.LastCheckpoint != null
+    });
+});
+
+// POST /goals/{id}/pause — ACTIVE/MONITORING -> IDLE
+app.MapPost("/goals/{id}/pause", (string id) =>
+{
+    var g = goalEngine.Pause(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found or not pausable" });
+    return Results.Json(new { goalId = g.GoalId, state = g.State.ToString() });
+});
+
+// POST /goals/{id}/resume — IDLE -> ACTIVE
+app.MapPost("/goals/{id}/resume", (string id) =>
+{
+    var g = goalEngine.Resume(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found or not idle" });
+    return Results.Json(new { goalId = g.GoalId, state = g.State.ToString() });
+});
+
+// POST /goals/{id}/evaluate — force evaluation (no task spawn, just check criteria)
+app.MapPost("/goals/{id}/evaluate", (string id) =>
+{
+    var g = goalStore.GetById(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found" });
+    var (isAchieved, reason, nextAction) = goalEngine.Evaluate(g);
+    return Results.Json(new
+    {
+        goalId     = g.GoalId,
+        isAchieved,
+        reason,
+        nextAction,
+        state      = g.State.ToString(),
+        progress   = Math.Round(g.Progress, 2)
+    });
+});
+
+// GET /goals/{id}/tasks — all tasks spawned by this goal
+app.MapGet("/goals/{id}/tasks", (string id) =>
+{
+    var g = goalStore.GetById(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found" });
+
+    var tasks = g.TaskIds
+        .Select(tid => taskService.GetTask(tid))
+        .Where(t => t != null)
+        .Select(t => new
+        {
+            taskId  = t!.TaskId,
+            title   = t.Title,
+            state   = t.State.ToString(),
+            created = t.CreatedAtUtc
+        })
+        .ToList();
+
+    return Results.Json(new { goalId = id, count = tasks.Count, tasks });
+});
+
+// DELETE /goals/{id} — cancel and remove goal
+app.MapDelete("/goals/{id}", (string id) =>
+{
+    var g = goalStore.GetById(id);
+    if (g == null) return Results.NotFound(new { error = "goal not found" });
+
+    // If has active task, try to cancel it
+    if (!string.IsNullOrEmpty(g.CurrentTaskId))
+    {
+        try { taskService.Cancel(g.CurrentTaskId); } catch { }
+    }
+
+    goalStore.Delete(id);
+    return Results.Json(new { ok = true, goalId = id });
+});
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
-app.Lifetime.ApplicationStopping.Register(() => llmAdapter.Dispose());
+app.Lifetime.ApplicationStopping.Register(() => { llmAdapter.Dispose(); goalRunner.Stop(); });
 app.Run();
 
 // ── Phase 22: Chat request model ───────────────────────────────────────────

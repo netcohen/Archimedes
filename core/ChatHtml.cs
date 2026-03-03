@@ -303,6 +303,46 @@ public static class ChatHtml
             .rec-btn-retry   { background: #1f6feb22; color: #58a6ff; border-color: #1f6feb44; }
             .rec-btn-dismiss { background: #f8514922; color: #f85149; border-color: #f8514944; }
 
+            /* ── Goals section (Phase 26) ─────────────────────────────── */
+            #goals-header {
+              padding: 10px 12px 6px;
+              font-size: 0.75rem;
+              font-weight: 700;
+              color: #8b949e;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              border-top: 1px solid #30363d;
+              border-bottom: 1px solid #21262d;
+            }
+            #goals-list {
+              overflow-y: auto;
+              padding: 6px 8px;
+              display: flex;
+              flex-direction: column;
+              gap: 5px;
+              max-height: 160px;
+            }
+            .goal-item {
+              background: #161b22;
+              border: 1px solid #30363d;
+              border-radius: 8px;
+              padding: 7px 10px;
+              font-size: 0.78rem;
+            }
+            .goal-item .g-title { color: #e6edf3; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .goal-item .g-meta  { display: flex; gap: 6px; align-items: center; }
+            .goal-item .g-state { font-size: 0.68rem; padding: 1px 5px; border-radius: 4px; display: inline-block; }
+            .gs-active    { background: #388bfd22; color: #58a6ff; border: 1px solid #388bfd44; }
+            .gs-monitoring{ background: #d2992222; color: #d29922; border: 1px solid #d2992244; }
+            .gs-completed { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+            .gs-failed    { background: #f8514922; color: #f85149; border: 1px solid #f8514944; }
+            .gs-idle      { background: #30363d; color: #8b949e; }
+            .goal-item .g-progress {
+              flex: 1; height: 3px; background: #21262d; border-radius: 2px; overflow: hidden;
+            }
+            .goal-item .g-progress-bar { height: 100%; background: #388bfd; border-radius: 2px; }
+            #no-goals { color: #484f58; font-size: 0.78rem; text-align: center; padding: 12px 8px; }
+
             /* ── Scrollbar ────────────────────────────────────────────── */
             ::-webkit-scrollbar       { width: 5px; }
             ::-webkit-scrollbar-track { background: transparent; }
@@ -319,7 +359,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.25.0</span>
+          <span class="version">v0.26.0</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
@@ -344,11 +384,16 @@ public static class ChatHtml
             </div>
           </div>
 
-          <!-- Tasks panel (LEFT) -->
+          <!-- Tasks + Goals panel (LEFT) -->
           <div id="tasks-panel">
             <div id="tasks-header">📋 משימות פעילות</div>
             <div id="tasks-list">
               <div id="no-tasks">אין משימות פעילות</div>
+            </div>
+            <!-- Phase 26: Goals section -->
+            <div id="goals-header">🎯 מטרות</div>
+            <div id="goals-list">
+              <div id="no-goals">אין מטרות פעילות</div>
             </div>
           </div>
 
@@ -547,7 +592,9 @@ public static class ChatHtml
               if (d.intent) html += `<div class="intent-chip">${esc(d.intent)}</div><br/>`;
               html += esc(d.reply);
               if (d.taskId) html += `<br/><br/><span style="color:#58a6ff;font-size:.8rem">📋 משימה: ${esc(d.taskId)}</span>`;
+              if (d.goalId) html += `<br/><br/><span style="color:#3fb950;font-size:.8rem">🎯 מטרה: ${esc(d.goalId)}</span>`;
               appendMsg(html, 'msg-system');
+              if (d.goalId) pollGoals();
             } catch {
               appendMsg('שגיאה: לא ניתן להגיע לשרת', 'msg-system');
             }
@@ -567,11 +614,53 @@ public static class ChatHtml
             this.style.height = Math.min(this.scrollHeight, 120) + 'px';
           });
 
+          // ── Polling: goals (Phase 26) ────────────────────────────────────
+          const GOAL_STATE_LABEL = {
+            ACTIVE: 'פעיל', MONITORING: 'מנטר', IDLE: 'מושהה',
+            COMPLETED: 'הושלם', FAILED: 'נכשל'
+          };
+          const GOAL_STATE_CSS = {
+            ACTIVE: 'gs-active', MONITORING: 'gs-monitoring', IDLE: 'gs-idle',
+            COMPLETED: 'gs-completed', FAILED: 'gs-failed'
+          };
+
+          async function pollGoals() {
+            try {
+              const r = await fetch('/goals');
+              if (!r.ok) return;
+              const d    = await r.json();
+              const list = document.getElementById('goals-list');
+
+              const interesting = (d.goals || []).filter(g =>
+                g.state === 'ACTIVE' || g.state === 'MONITORING' || g.state === 'IDLE');
+
+              if (interesting.length === 0) {
+                list.innerHTML = '<div id="no-goals" style="color:#484f58;font-size:.78rem;text-align:center;padding:12px 8px">אין מטרות פעילות</div>';
+                return;
+              }
+
+              list.innerHTML = interesting.map(g => {
+                const css   = GOAL_STATE_CSS[g.state]   || 'gs-idle';
+                const label = GOAL_STATE_LABEL[g.state] || g.state;
+                const pct   = Math.round((g.progress || 0) * 100);
+                return `
+                  <div class="goal-item">
+                    <div class="g-title" title="${esc(g.goalId)}">${esc(g.title)}</div>
+                    <div class="g-meta">
+                      <span class="g-state ${css}">${label}</span>
+                      <div class="g-progress"><div class="g-progress-bar" style="width:${pct}%"></div></div>
+                    </div>
+                  </div>`;
+              }).join('');
+            } catch { /* silent */ }
+          }
+
           // ── Start polling ────────────────────────────────────────────────
           pollMetrics();   setInterval(pollMetrics,   5000);
           pollTasks();     setInterval(pollTasks,     3000);
           pollStatus();    setInterval(pollStatus,    2000);
           pollRecovery();  setInterval(pollRecovery,  4000);  // Phase 24
+          pollGoals();     setInterval(pollGoals,     5000);  // Phase 26
         </script>
 
         </body>
