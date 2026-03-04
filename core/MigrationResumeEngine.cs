@@ -14,7 +14,9 @@ namespace Archimedes.Core;
 ///      c. Delete the log so it only runs once
 ///
 /// Additionally exposes ReceivePackage() for the HTTP /migration/receive endpoint —
-/// extracts the zip directly and then calls TryResume().
+/// handles single-volume and multi-volume split packages.
+///   - Single volume → extract + TryResume() immediately
+///   - Multi-volume  → collect all volumes in temp; restore only when all arrive
 /// </summary>
 public class MigrationResumeEngine
 {
@@ -24,7 +26,21 @@ public class MigrationResumeEngine
     private readonly TaskService      _taskService;
     private readonly GoalStore        _goalStore;
 
-    private const string LogFileName = "continuation_log.json";
+    private const string LogFileName      = "continuation_log.json";
+    private const string ManifestFileName = "volume_manifest.json";
+
+    // ── Multi-volume tracking ──────────────────────────────────────────────
+    // Key: migrationId  Value: (receivedCount, totalExpected, mergedTempDir)
+    private readonly Dictionary<string, VolumeTracker> _pending = new();
+    private readonly object _pendingLock = new();
+
+    private sealed class VolumeTracker
+    {
+        public int    Total      { get; set; }
+        public int    Received   { get; set; }
+        public string MergedDir  { get; }
+        public VolumeTracker(int total, string mergedDir) { Total = total; MergedDir = mergedDir; }
+    }
 
     public MigrationResumeEngine(
         string           dataRoot,
@@ -94,11 +110,14 @@ public class MigrationResumeEngine
     // ── HTTP receive ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Receives a migration zip from the source machine (HTTP POST).
-    /// Extracts the data files + continuation log, then calls TryResume().
+    /// Receives one migration zip volume from the source machine (HTTP POST).
+    /// For single-volume packages: restores immediately.
+    /// For multi-volume packages: buffers until all volumes arrive, then restores.
+    /// Returns true when a complete restore was applied.
     /// </summary>
     public bool ReceivePackage(Stream zipStream)
     {
+        // Extract the incoming zip to a temporary directory
         var tempDir = Path.Combine(
             Path.GetTempPath(), $"arch_recv_{Guid.NewGuid():N}");
 
@@ -111,11 +130,81 @@ public class MigrationResumeEngine
                 zip.ExtractToDirectory(tempDir, overwriteFiles: true);
             }
 
-            ArchLogger.LogInfo(
-                $"[MigrationResume] Package extracted to {tempDir}");
+            ArchLogger.LogInfo($"[MigrationResume] Volume extracted to {tempDir}");
 
+            // Read volume manifest (present only for split packages)
+            var manifest = ReadManifest(tempDir);
+
+            if (manifest == null || manifest.TotalVolumes <= 1)
+            {
+                // ── Single-volume package ─────────────────────────────────
+                return RestoreFromDir(tempDir);
+            }
+            else
+            {
+                // ── Multi-volume package ──────────────────────────────────
+                return AccumulateVolume(manifest, tempDir);
+            }
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn(
+                $"[MigrationResume] ReceivePackage failed: {ex.Message}");
+            return false;
+        }
+        // Note: tempDir cleanup happens inside RestoreFromDir / AccumulateVolume
+        // to avoid deleting the shared merge dir prematurely.
+    }
+
+    // ── Multi-volume accumulation ──────────────────────────────────────────
+
+    private bool AccumulateVolume(MigrationVolumeManifest manifest, string tempDir)
+    {
+        string mergedDir;
+        bool   allReceived;
+
+        lock (_pendingLock)
+        {
+            if (!_pending.TryGetValue(manifest.MigrationId, out var tracker))
+            {
+                mergedDir = Path.Combine(
+                    Path.GetTempPath(), $"arch_merge_{manifest.MigrationId}");
+                Directory.CreateDirectory(mergedDir);
+                tracker = new VolumeTracker(manifest.TotalVolumes, mergedDir);
+                _pending[manifest.MigrationId] = tracker;
+            }
+
+            mergedDir = tracker.MergedDir;
+
+            // Merge this volume's contents into the shared merge dir
+            MergeDirectory(tempDir, mergedDir);
+            try { Directory.Delete(tempDir, recursive: true); } catch { }
+
+            tracker.Received++;
+            allReceived = tracker.Received >= tracker.Total;
+
+            ArchLogger.LogInfo(
+                $"[MigrationResume] Volume {manifest.VolumeIndex}/{manifest.TotalVolumes} " +
+                $"received for migration {manifest.MigrationId} " +
+                $"({tracker.Received}/{tracker.Total})");
+        }
+
+        if (!allReceived) return false;
+
+        // All volumes received — restore and clean up
+        lock (_pendingLock) { _pending.Remove(manifest.MigrationId); }
+
+        return RestoreFromDir(mergedDir);
+    }
+
+    // ── Restore from extracted directory ───────────────────────────────────
+
+    private bool RestoreFromDir(string sourceDir)
+    {
+        try
+        {
             // Restore data files
-            var dataDir = Path.Combine(tempDir, "data");
+            var dataDir = Path.Combine(sourceDir, "data");
             if (Directory.Exists(dataDir))
             {
                 CopyDirectory(dataDir, _dataRoot);
@@ -124,7 +213,7 @@ public class MigrationResumeEngine
             }
 
             // Place continuation log for TryResume()
-            var logSrc = Path.Combine(tempDir, LogFileName);
+            var logSrc = Path.Combine(sourceDir, LogFileName);
             if (File.Exists(logSrc))
             {
                 File.Copy(logSrc,
@@ -137,12 +226,12 @@ public class MigrationResumeEngine
         catch (Exception ex)
         {
             ArchLogger.LogWarn(
-                $"[MigrationResume] ReceivePackage failed: {ex.Message}");
+                $"[MigrationResume] RestoreFromDir failed: {ex.Message}");
             return false;
         }
         finally
         {
-            try { Directory.Delete(tempDir, recursive: true); } catch { }
+            try { Directory.Delete(sourceDir, recursive: true); } catch { }
         }
     }
 
@@ -202,7 +291,21 @@ public class MigrationResumeEngine
 
     // ── Static helpers ─────────────────────────────────────────────────────
 
-    private static void CopyDirectory(string source, string destination)
+    private static MigrationVolumeManifest? ReadManifest(string dir)
+    {
+        var path = Path.Combine(dir, ManifestFileName);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<MigrationVolumeManifest>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Merges all files from source into destination (overwrites).</summary>
+    private static void MergeDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
 
@@ -215,8 +318,11 @@ public class MigrationResumeEngine
 
         foreach (var dir in Directory.GetDirectories(source))
         {
-            CopyDirectory(dir,
+            MergeDirectory(dir,
                 Path.Combine(destination, Path.GetFileName(dir)));
         }
     }
+
+    private static void CopyDirectory(string source, string destination)
+        => MergeDirectory(source, destination);
 }

@@ -200,10 +200,75 @@ Write-Host "`n[14] ChatHtml.cs version bump" -ForegroundColor Cyan
 # ─────────────────────────────────────────────────────────────────────────────
 
 $chatContent = Get-Content (Join-Path $coreDir 'ChatHtml.cs') -Raw
-Assert-Contains $chatContent 'v0.28.0'            "ChatHtml.cs version is v0.28.0"
-Assert-Contains $chatContent 'migration-panel'    "ChatHtml.cs has migration-panel element"
-Assert-Contains $chatContent 'startMigration'     "ChatHtml.cs has startMigration() function"
-Assert-Contains $chatContent 'pollMigration'      "ChatHtml.cs has pollMigration() function"
+Assert-Contains $chatContent 'v0.28.1'              "ChatHtml.cs version is v0.28.1"
+Assert-Contains $chatContent 'migration-panel'      "ChatHtml.cs has migration-panel element"
+Assert-Contains $chatContent 'startMigration'       "ChatHtml.cs has startMigration() function"
+Assert-Contains $chatContent 'pollMigration'        "ChatHtml.cs has pollMigration() function"
+Assert-Contains $chatContent 'estimateMigration'    "ChatHtml.cs has estimateMigration() function"
+Assert-Contains $chatContent 'mig-vol-gb'           "ChatHtml.cs has volume-size input"
+Assert-Contains $chatContent 'maxVolumeSizeMB'      "ChatHtml.cs passes maxVolumeSizeMB to API"
+
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Host "`n[15] GET /migration/estimate - pre-flight size estimate" -ForegroundColor Cyan
+# ─────────────────────────────────────────────────────────────────────────────
+
+$est = Get-Json "$base/migration/estimate"
+Assert-True ($null -ne $est.estimatedPackageMB) "GET /migration/estimate returns estimatedPackageMB"
+Assert-True ($null -ne $est.recommendedDriveMB) "GET /migration/estimate returns recommendedDriveMB"
+Assert-True ($null -ne $est.rawDataMB)          "GET /migration/estimate returns rawDataMB"
+Assert-True ($null -ne $est.breakdown)          "GET /migration/estimate returns breakdown object"
+Assert-True ($null -ne $est.breakdown.databaseMB)   "breakdown has databaseMB"
+Assert-True ($null -ne $est.breakdown.proceduresMB) "breakdown has proceduresMB"
+Assert-True ($null -ne $est.breakdown.toolStoreMB)  "breakdown has toolStoreMB"
+Assert-True ($null -ne $est.breakdown.goalsMB)      "breakdown has goalsMB"
+Assert-True ($null -ne $est.breakdown.otherMB)      "breakdown has otherMB"
+Assert-True ($est.recommendedDriveMB -ge $est.estimatedPackageMB) "recommendedDriveMB >= estimatedPackageMB"
+
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Host "`n[16] POST /migration/start - maxVolumeSizeMB echoed back" -ForegroundColor Cyan
+# ─────────────────────────────────────────────────────────────────────────────
+
+$tmpTarget2 = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "arch_gate_vol_$(Get-Random)")
+$volResp = Post-Json "$base/migration/start" @{
+    targetPath     = $tmpTarget2
+    targetType     = 'LOCAL_PATH'
+    dryRun         = $true
+    maxVolumeSizeMB = 500
+}
+Assert-True ($null -ne $volResp.migrationId)     "Split dry-run: migrationId returned"
+Assert-True ($volResp.maxVolumeSizeMB -eq 500)   "Split dry-run: maxVolumeSizeMB=500 echoed"
+
+# Poll until COMPLETED
+$volStatus = $null
+for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 500
+    $vPlan = Get-Json "$base/migration/status/$($volResp.migrationId)"
+    if ($vPlan.status -in @('COMPLETED','FAILED')) { $volStatus = $vPlan.status; break }
+}
+Assert-True ($volStatus -eq 'COMPLETED') "Split dry-run migration reaches COMPLETED"
+
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Host "`n[17] MigrationModels.cs - new types present in source" -ForegroundColor Cyan
+# ─────────────────────────────────────────────────────────────────────────────
+
+$modelsContent2 = Get-Content (Join-Path $coreDir 'MigrationModels.cs') -Raw
+Assert-Contains $modelsContent2 'MigrationSizeEstimate'    "MigrationSizeEstimate class exists"
+Assert-Contains $modelsContent2 'MigrationSizeBreakdown'   "MigrationSizeBreakdown class exists"
+Assert-Contains $modelsContent2 'MigrationVolumeManifest'  "MigrationVolumeManifest class exists"
+Assert-Contains $modelsContent2 'MaxVolumeSizeMB'          "StartMigrationRequest has MaxVolumeSizeMB"
+Assert-Contains $modelsContent2 'VolumeCount'              "MigrationPlan has VolumeCount"
+Assert-Contains $modelsContent2 'PackagePaths'             "MigrationPlan has PackagePaths"
+
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Host "`n[18] MigrationStatePackager.cs - new methods present" -ForegroundColor Cyan
+# ─────────────────────────────────────────────────────────────────────────────
+
+$packagerContent = Get-Content (Join-Path $coreDir 'MigrationStatePackager.cs') -Raw
+Assert-Contains $packagerContent 'GetDetailedEstimate'  "MigrationStatePackager has GetDetailedEstimate"
+Assert-Contains $packagerContent 'BinPack'              "MigrationStatePackager has BinPack"
+Assert-Contains $packagerContent 'CreateSplitZips'      "MigrationStatePackager has CreateSplitZips"
+Assert-Contains $packagerContent 'CollectFiles'         "MigrationStatePackager has CollectFiles"
+Assert-Contains $packagerContent 'MigrationVolumeManifest' "Packager uses MigrationVolumeManifest"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

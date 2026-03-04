@@ -56,10 +56,11 @@ public class MigrationEngine
 
         var plan = new MigrationPlan
         {
-            TargetType = targetType,
-            TargetPath = request.TargetPath,
-            DryRun     = request.DryRun,
-            Status     = MigrationStatus.CHECKING_DISK
+            TargetType      = targetType,
+            TargetPath      = request.TargetPath,
+            DryRun          = request.DryRun,
+            MaxVolumeSizeMB = request.MaxVolumeSizeMB,
+            Status          = MigrationStatus.CHECKING_DISK
         };
 
         lock (_lock) { _plans[plan.MigrationId] = plan; }
@@ -99,9 +100,13 @@ public class MigrationEngine
             plan.RequiredDiskMB = _packager.EstimatePackageSizeMB();
 
             // ── 2. Check target disk ──────────────────────────────────────
+            // In split mode, the target only needs to hold one volume at a time.
+            var diskNeeded = plan.MaxVolumeSizeMB > 0
+                ? plan.MaxVolumeSizeMB
+                : plan.RequiredDiskMB;
             plan.Status = MigrationStatus.CHECKING_DISK;
             var disk = await _diskChecker.CheckAsync(
-                plan.TargetType, plan.TargetPath, plan.RequiredDiskMB);
+                plan.TargetType, plan.TargetPath, diskNeeded);
 
             plan.AvailableDiskMB = disk.AvailableMB;
 

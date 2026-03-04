@@ -3,10 +3,10 @@ using System.Net.Http.Headers;
 namespace Archimedes.Core;
 
 /// <summary>
-/// Phase 28 — Copies the migration package to the target.
+/// Phase 28 — Copies the migration package(s) to the target.
 ///
-/// LOCAL_PATH → File.Copy zip + write restore-archimedes.ps1 helper script
-/// HTTP_URL   → POST zip as multipart to {target}/migration/receive
+/// LOCAL_PATH → File.Copy all volume zips + write restore-archimedes.ps1 helper script
+/// HTTP_URL   → POST each volume zip as multipart to {target}/migration/receive
 /// </summary>
 public class MigrationDeployer
 {
@@ -20,21 +20,26 @@ public class MigrationDeployer
         MigrationPlan     plan,
         CancellationToken ct = default)
     {
-        if (plan.PackagePath == null || !File.Exists(plan.PackagePath))
+        // Resolve the list of volumes (PackagePaths takes precedence over the
+        // legacy single-file PackagePath for backward compatibility).
+        var zips = ResolveZipPaths(plan);
+
+        if (zips.Count == 0)
         {
-            ArchLogger.LogWarn("[Deployer] Package file not found — cannot deploy");
+            plan.Error = "No package files found — cannot deploy";
+            ArchLogger.LogWarn($"[Deployer] {plan.Error}");
             return false;
         }
 
         ArchLogger.LogInfo(
-            $"[Deployer] Deploying {plan.PackagePath} → {plan.TargetPath} " +
+            $"[Deployer] Deploying {zips.Count} volume(s) → '{plan.TargetPath}' " +
             $"(type={plan.TargetType})");
 
         try
         {
             return plan.TargetType == MigrationTargetType.HTTP_URL
-                ? await DeployHttpAsync(plan, ct)
-                : DeployLocalPath(plan);
+                ? await DeployHttpAsync(plan, zips, ct)
+                : DeployLocalPath(plan, zips);
         }
         catch (Exception ex)
         {
@@ -46,67 +51,98 @@ public class MigrationDeployer
 
     // ── Local / UNC path ───────────────────────────────────────────────────
 
-    private static bool DeployLocalPath(MigrationPlan plan)
+    private static bool DeployLocalPath(MigrationPlan plan, List<string> zips)
     {
         try { Directory.CreateDirectory(plan.TargetPath); } catch { }
 
-        // Copy zip
-        var destZip = Path.Combine(plan.TargetPath,
-            Path.GetFileName(plan.PackagePath!));
-        File.Copy(plan.PackagePath!, destZip, overwrite: true);
+        var destZips = new List<string>(zips.Count);
+        foreach (var src in zips)
+        {
+            if (!File.Exists(src)) continue;
+            var dest = Path.Combine(plan.TargetPath, Path.GetFileName(src));
+            File.Copy(src, dest, overwrite: true);
+            destZips.Add(dest);
+        }
 
-        // Drop a PowerShell restore helper
+        if (destZips.Count == 0)
+        {
+            plan.Error = "No package files could be copied";
+            return false;
+        }
+
+        // Drop a PowerShell restore helper that handles single or multi-volume
         var scriptPath = Path.Combine(plan.TargetPath, "restore-archimedes.ps1");
-        File.WriteAllText(scriptPath, BuildRestoreScript(destZip));
+        File.WriteAllText(scriptPath, BuildRestoreScript(destZips));
 
         ArchLogger.LogInfo(
-            $"[Deployer] Copied to {destZip} + restore script at {scriptPath}");
+            $"[Deployer] Copied {destZips.Count} volume(s) to {plan.TargetPath} " +
+            $"+ restore script at {scriptPath}");
         return true;
     }
 
     // ── HTTP target ────────────────────────────────────────────────────────
 
-    private async Task<bool> DeployHttpAsync(MigrationPlan plan, CancellationToken ct)
+    private async Task<bool> DeployHttpAsync(
+        MigrationPlan    plan,
+        List<string>     zips,
+        CancellationToken ct)
     {
         var url = $"{plan.TargetPath.TrimEnd('/')}/migration/receive";
 
-        using var content = new MultipartFormDataContent();
-        var fileBytes   = await File.ReadAllBytesAsync(plan.PackagePath!, ct);
-        var byteContent = new ByteArrayContent(fileBytes);
-        byteContent.Headers.ContentType =
-            new MediaTypeHeaderValue("application/octet-stream");
-        content.Add(byteContent, "package",
-            Path.GetFileName(plan.PackagePath!));
+        for (int i = 0; i < zips.Count; i++)
+        {
+            var zipPath = zips[i];
+            if (!File.Exists(zipPath)) continue;
 
-        using var resp = await _http.PostAsync(url, content, ct);
-        resp.EnsureSuccessStatusCode();
+            using var content   = new MultipartFormDataContent();
+            var fileBytes       = await File.ReadAllBytesAsync(zipPath, ct);
+            var byteContent     = new ByteArrayContent(fileBytes);
+            byteContent.Headers.ContentType =
+                new MediaTypeHeaderValue("application/octet-stream");
+            content.Add(byteContent, "package", Path.GetFileName(zipPath));
 
-        ArchLogger.LogInfo($"[Deployer] Package delivered via HTTP to {url}");
+            using var resp = await _http.PostAsync(url, content, ct);
+            resp.EnsureSuccessStatusCode();
+
+            ArchLogger.LogInfo(
+                $"[Deployer] Volume {i + 1}/{zips.Count} delivered via HTTP: " +
+                $"{Path.GetFileName(zipPath)}");
+        }
+
+        ArchLogger.LogInfo($"[Deployer] All {zips.Count} volume(s) delivered to {url}");
         return true;
     }
 
-    // ── Restore script ─────────────────────────────────────────────────────
+    // ── Restore script (handles single or multi-volume) ────────────────────
 
-    private static string BuildRestoreScript(string zipPath)
+    private static string BuildRestoreScript(List<string> destZips)
     {
-        // Use $$"""...""" (double-dollar raw string):
-        //   {{expr}} = C# interpolation,  { and } alone = literal PowerShell braces
+        // Build a PowerShell array literal of quoted paths
+        var zipArrayLiteral = string.Join(",\n    ",
+            destZips.Select(p => $"\"{p.Replace("\\", "\\\\")}\""));
+
         var ts = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+
+        // Use $"""...""" (double-dollar raw string interpolation):
+        //   {{expr}} = C# interpolation   { and } alone = literal PowerShell braces
         return
 $$"""
 # Archimedes Migration Restore Script
 # Generated : {{ts}} UTC
 # Run this on the target machine BEFORE starting Archimedes.
+# Handles both single-zip and multi-volume split packages.
 
 param(
-    [string]$ZipPath = "{{zipPath}}"
+    [string[]]$ZipPaths = @(
+    {{zipArrayLiteral}}
+    )
 )
 
 $dataRoot   = "$env:LOCALAPPDATA\Archimedes"
 $backupRoot = "$env:LOCALAPPDATA\Archimedes_bak_$(Get-Date -Format yyyyMMddHHmmss)"
 $tempDir    = "$env:TEMP\arch_restore_$(New-Guid)"
 
-Write-Host "Archimedes migration restore starting..."
+Write-Host "Archimedes migration restore starting ($($ZipPaths.Count) volume(s))..."
 
 # 1. Back up existing data
 if (Test-Path $dataRoot) {
@@ -114,8 +150,16 @@ if (Test-Path $dataRoot) {
     Copy-Item -Recurse $dataRoot $backupRoot -Force
 }
 
-# 2. Extract package
-Expand-Archive -Path $ZipPath -DestinationPath $tempDir -Force
+# 2. Extract all volumes (merged into single temp dir)
+New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+foreach ($zip in $ZipPaths) {
+    if (-not (Test-Path $zip)) {
+        Write-Warning "Volume not found: $zip — skipping"
+        continue
+    }
+    Write-Host "Extracting $zip ..."
+    Expand-Archive -Path $zip -DestinationPath $tempDir -Force
+}
 
 # 3. Restore data files
 $srcData = "$tempDir\data"
@@ -139,5 +183,18 @@ Write-Host ""
 Write-Host "Restore complete.  Start Archimedes -- it will automatically"
 Write-Host "re-protect encryption keys and resume paused tasks."
 """;
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+
+    private static List<string> ResolveZipPaths(MigrationPlan plan)
+    {
+        if (plan.PackagePaths.Count > 0)
+            return plan.PackagePaths.Where(File.Exists).ToList();
+
+        if (plan.PackagePath != null && File.Exists(plan.PackagePath))
+            return new List<string> { plan.PackagePath };
+
+        return new List<string>();
     }
 }

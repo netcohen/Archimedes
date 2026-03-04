@@ -2070,6 +2070,26 @@ app.MapGet("/tools/sources", () =>
 
 // ── Phase 28: Machine Migration (Octopus) ────────────────────────────────────
 
+// GET /migration/estimate — pre-flight size estimate (no side effects)
+app.MapGet("/migration/estimate", () =>
+{
+    var est = migrationPackager.GetDetailedEstimate();
+    return Results.Json(new
+    {
+        rawDataMB          = est.RawDataMB,
+        estimatedPackageMB = est.EstimatedPackageMB,
+        recommendedDriveMB = est.RecommendedDriveMB,
+        breakdown          = new
+        {
+            databaseMB   = est.Breakdown.DatabaseMB,
+            proceduresMB = est.Breakdown.ProceduresMB,
+            toolStoreMB  = est.Breakdown.ToolStoreMB,
+            goalsMB      = est.Breakdown.GoalsMB,
+            otherMB      = est.Breakdown.OtherMB
+        }
+    });
+});
+
 // POST /migration/start — initiates migration (non-blocking, returns plan immediately)
 app.MapPost("/migration/start", async (HttpRequest req) =>
 {
@@ -2089,12 +2109,13 @@ app.MapPost("/migration/start", async (HttpRequest req) =>
     var plan = migrationEngine.Start(request);
     return Results.Json(new
     {
-        migrationId    = plan.MigrationId,
-        status         = plan.Status.ToString(),
-        targetPath     = plan.TargetPath,
-        targetType     = plan.TargetType.ToString(),
-        dryRun         = plan.DryRun,
-        startedAt      = plan.StartedAt
+        migrationId     = plan.MigrationId,
+        status          = plan.Status.ToString(),
+        targetPath      = plan.TargetPath,
+        targetType      = plan.TargetType.ToString(),
+        dryRun          = plan.DryRun,
+        maxVolumeSizeMB = plan.MaxVolumeSizeMB,
+        startedAt       = plan.StartedAt
     });
 });
 
@@ -2145,10 +2166,13 @@ app.MapGet("/migration/status/{id}", (string id) =>
             stepBefore = d.StepBefore,
             stateBefore = d.StateBefore.ToString()
         }),
-        packagePath    = plan.PackagePath,
-        error          = plan.Error,
-        startedAt      = plan.StartedAt,
-        completedAt    = plan.CompletedAt
+        maxVolumeSizeMB = plan.MaxVolumeSizeMB,
+        volumeCount     = plan.VolumeCount,
+        packagePaths    = plan.PackagePaths,
+        packagePath     = plan.PackagePath,
+        error           = plan.Error,
+        startedAt       = plan.StartedAt,
+        completedAt     = plan.CompletedAt
     });
 });
 

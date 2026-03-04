@@ -5,8 +5,8 @@ namespace Archimedes.Core;
 /// Served at GET /chat. No external dependencies — vanilla HTML/CSS/JS only.
 /// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar,
 ///           recovery dialogue cards (Phase 24), tool acquisition panel (Phase 27),
-///           machine migration panel (Phase 28).
-/// Version: v0.28.0
+///           machine migration panel with pre-flight estimate + split-volume support (Phase 28).
+/// Version: v0.28.1
 /// </summary>
 public static class ChatHtml
 {
@@ -421,7 +421,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.28.0</span>
+          <span class="version">v0.28.1</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
@@ -469,6 +469,7 @@ public static class ChatHtml
             <!-- Phase 28: Migration section -->
             <div id="migration-header" style="margin-top:10px;font-size:.8rem;font-weight:600;color:#58a6ff">🚀 מיגרציה</div>
             <div id="migration-panel" style="margin-top:4px">
+              <!-- Row 1: target path + buttons -->
               <div style="display:flex;gap:4px;margin-bottom:4px">
                 <input id="mig-target" type="text" placeholder="\\\\server\\share  או  http://host:5051"
                   style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:4px;font-size:.72rem;direction:ltr">
@@ -482,6 +483,20 @@ public static class ChatHtml
                   בדיקה
                 </button>
               </div>
+              <!-- Row 2: volume size (optional) + estimate button -->
+              <div style="display:flex;gap:4px;margin-bottom:4px;align-items:center">
+                <span style="font-size:.68rem;color:#8b949e;white-space:nowrap">כונן מקס׳ (GB):</span>
+                <input id="mig-vol-gb" type="number" min="0" placeholder="0 = ללא פיצול"
+                  style="width:110px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:4px;font-size:.72rem;direction:ltr">
+                <button onclick="estimateMigration()"
+                  style="background:#21262d;border:1px solid #30363d;color:#58a6ff;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:.72rem"
+                  title="הצג כמה מקום נדרש לפני ההעברה">
+                  📊 הערכה
+                </button>
+              </div>
+              <!-- Estimate result -->
+              <div id="migration-estimate" style="font-size:.72rem;margin-bottom:4px"></div>
+              <!-- Migration status list -->
               <div id="migration-list" style="font-size:.72rem;color:#8b949e"></div>
             </div>
           </div>
@@ -824,15 +839,52 @@ public static class ChatHtml
           }
 
           // ── Phase 28: Migration ──────────────────────────────────────────
+
+          // Returns maxVolumeSizeMB from the GB input (0 = no split)
+          function getMaxVolumeMB() {
+            const gb = parseFloat(document.getElementById('mig-vol-gb').value) || 0;
+            return gb > 0 ? Math.round(gb * 1024) : 0;
+          }
+
+          async function estimateMigration() {
+            const el = document.getElementById('migration-estimate');
+            el.innerHTML = '<span style="color:#58a6ff">מחשב...</span>';
+            try {
+              const r = await fetch('/migration/estimate');
+              const d = await r.json();
+              const maxMB = getMaxVolumeMB();
+              const volCount = maxMB > 0 ? Math.ceil(d.estimatedPackageMB / maxMB) : 1;
+              const volLine  = maxMB > 0
+                ? `<br><span style="color:#d29922">כונן ${maxMB} MB → ${volCount} כרך${volCount > 1 ? 'ים' : ''}</span>`
+                : '';
+              el.innerHTML = `
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:4px;padding:5px 7px">
+                  <div style="color:#3fb950;font-weight:600">
+                    📦 ${d.estimatedPackageMB} MB • כונן מינ׳: ${d.recommendedDriveMB} MB
+                  </div>${volLine}
+                  <div style="color:#8b949e;margin-top:3px;font-size:.68rem">
+                    DB ${d.breakdown.databaseMB}MB ·
+                    נהלים ${d.breakdown.proceduresMB}MB ·
+                    כלים ${d.breakdown.toolStoreMB}MB ·
+                    מטרות ${d.breakdown.goalsMB}MB ·
+                    אחר ${d.breakdown.otherMB}MB
+                  </div>
+                </div>`;
+            } catch(e) {
+              el.innerHTML = `<span style="color:#f85149">שגיאה: ${esc(e.message)}</span>`;
+            }
+          }
+
           async function startMigration(dryRun) {
             const target = document.getElementById('mig-target').value.trim();
             if (!target) { alert('הכנס נתיב יעד'); return; }
-            const targetType = target.startsWith('http') ? 'HTTP_URL' : 'LOCAL_PATH';
+            const targetType    = target.startsWith('http') ? 'HTTP_URL' : 'LOCAL_PATH';
+            const maxVolumeSizeMB = getMaxVolumeMB();
             try {
               const r = await fetch('/migration/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ targetPath: target, targetType, dryRun })
+                body: JSON.stringify({ targetPath: target, targetType, dryRun, maxVolumeSizeMB })
               });
               const d = await r.json();
               pollMigration();
@@ -851,14 +903,16 @@ public static class ChatHtml
               const statusColor = { COMPLETED:'#3fb950', FAILED:'#f85149', CHECKING_DISK:'#d29922',
                                     SUSPENDING_TASKS:'#d29922', PACKAGING:'#58a6ff', DEPLOYING:'#58a6ff' };
               el.innerHTML = d.migrations.slice(0, 3).map(m => {
-                const col = statusColor[m.status] || '#8b949e';
-                const label = m.dryRun ? ' (dry-run)' : '';
+                const col     = statusColor[m.status] || '#8b949e';
+                const label   = m.dryRun ? ' (dry-run)' : '';
+                const volInfo = m.volumeCount > 1
+                  ? ` · ${m.volumeCount} כרכים` : '';
                 return `<div style="border-left:2px solid ${col};padding:3px 6px;margin-bottom:3px">
                   <span style="color:${col}">${m.status}</span>${label}<br>
                   <span style="direction:ltr;font-size:.68rem">${esc(m.targetPath)}</span><br>
                   ${m.error ? `<span style="color:#f85149;font-size:.68rem">${esc(m.error)}</span><br>` : ''}
                   <span style="color:#484f58;font-size:.65rem">
-                    💾 ${m.requiredDiskMB} MB · ${m.taskCount} tasks · ${m.migrationId}
+                    💾 ${m.requiredDiskMB} MB${volInfo} · ${m.taskCount} tasks · ${m.migrationId}
                   </span>
                 </div>`;
               }).join('');
