@@ -65,6 +65,19 @@ goalRunner.Start();
 var smartScheduler = new SmartScheduler(taskService, planner);
 smartScheduler.Start();
 
+// Phase 28: Machine Migration (Octopus)
+var migrationDataRoot  = Environment.GetEnvironmentVariable("ARCHIMEDES_DATA_PATH")
+    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Archimedes");
+var migrationHttp      = httpClientFactory.CreateClient();
+var migrationPackager  = new MigrationStatePackager(taskService, goalStore, encryptedStore, deviceKeyManager, migrationDataRoot);
+var migrationDiskChk   = new MigrationDiskChecker(migrationHttp);
+var taskSuspender      = new TaskSuspender(taskService);
+var migrationDeployer  = new MigrationDeployer(migrationHttp);
+var migrationEngine    = new MigrationEngine(migrationPackager, migrationDiskChk, taskSuspender, migrationDeployer);
+var migrationResumer   = new MigrationResumeEngine(migrationDataRoot, encryptedStore, deviceKeyManager, taskService, goalStore);
+// Detect and apply migration continuation log from previous machine (runs once, idempotent)
+migrationResumer.TryResume();
+
 var storageConfig = new StorageConfig
 {
     RootInternal = Environment.GetEnvironmentVariable("ARCHIMEDES_STORAGE_INTERNAL")
@@ -2053,6 +2066,107 @@ app.MapGet("/tools/sources", () =>
             lastUsed      = s.LastUsed
         })
     });
+});
+
+// ── Phase 28: Machine Migration (Octopus) ────────────────────────────────────
+
+// POST /migration/start — initiates migration (non-blocking, returns plan immediately)
+app.MapPost("/migration/start", async (HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    StartMigrationRequest? request;
+    try
+    {
+        request = JsonSerializer.Deserialize<StartMigrationRequest>(
+            body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    }
+    catch { return Results.BadRequest("Invalid JSON"); }
+
+    if (request == null || string.IsNullOrWhiteSpace(request.TargetPath))
+        return Results.BadRequest("targetPath required");
+
+    var plan = migrationEngine.Start(request);
+    return Results.Json(new
+    {
+        migrationId    = plan.MigrationId,
+        status         = plan.Status.ToString(),
+        targetPath     = plan.TargetPath,
+        targetType     = plan.TargetType.ToString(),
+        dryRun         = plan.DryRun,
+        startedAt      = plan.StartedAt
+    });
+});
+
+// GET /migration/status — list all migration plans
+app.MapGet("/migration/status", () =>
+{
+    var plans = migrationEngine.GetAllPlans();
+    return Results.Json(new
+    {
+        count = plans.Count,
+        migrations = plans.Select(p => new
+        {
+            migrationId    = p.MigrationId,
+            status         = p.Status.ToString(),
+            targetPath     = p.TargetPath,
+            targetType     = p.TargetType.ToString(),
+            dryRun         = p.DryRun,
+            requiredDiskMB = p.RequiredDiskMB,
+            availableMB    = p.AvailableDiskMB,
+            taskCount      = p.TaskDecisions.Count,
+            packagePath    = p.PackagePath,
+            error          = p.Error,
+            startedAt      = p.StartedAt,
+            completedAt    = p.CompletedAt
+        })
+    });
+});
+
+// GET /migration/status/{id} — single migration plan
+app.MapGet("/migration/status/{id}", (string id) =>
+{
+    var plan = migrationEngine.GetPlan(id);
+    if (plan == null) return Results.NotFound(new { error = "migration not found" });
+    return Results.Json(new
+    {
+        migrationId    = plan.MigrationId,
+        status         = plan.Status.ToString(),
+        targetPath     = plan.TargetPath,
+        targetType     = plan.TargetType.ToString(),
+        dryRun         = plan.DryRun,
+        requiredDiskMB = plan.RequiredDiskMB,
+        availableMB    = plan.AvailableDiskMB,
+        taskDecisions  = plan.TaskDecisions.Select(d => new
+        {
+            taskId     = d.TaskId,
+            title      = d.Title,
+            action     = d.Action.ToString(),
+            stepBefore = d.StepBefore,
+            stateBefore = d.StateBefore.ToString()
+        }),
+        packagePath    = plan.PackagePath,
+        error          = plan.Error,
+        startedAt      = plan.StartedAt,
+        completedAt    = plan.CompletedAt
+    });
+});
+
+// POST /migration/receive — target endpoint: receives zip and triggers resume
+app.MapPost("/migration/receive", async (HttpRequest req) =>
+{
+    // Expect multipart/form-data with a "package" file field
+    if (!req.HasFormContentType)
+        return Results.BadRequest("multipart/form-data expected");
+
+    var form = await req.ReadFormAsync();
+    var file = form.Files.GetFile("package");
+    if (file == null)
+        return Results.BadRequest("package file required");
+
+    using var stream = file.OpenReadStream();
+    var ok = migrationResumer.ReceivePackage(stream);
+    return Results.Json(new { ok, message = ok ? "Migration package received and applied" : "Package received but resume failed" });
 });
 
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;

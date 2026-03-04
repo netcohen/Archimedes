@@ -552,6 +552,31 @@ public class EncryptedStore : IDisposable
         };
     }
 
+    // ── Phase 28: Migration key helpers ──────────────────────────────────────
+
+    /// <summary>
+    /// Returns the raw (unprotected) database key bytes for migration packaging.
+    /// Treat these bytes as sensitive — protect the migration zip during transfer.
+    /// </summary>
+    public byte[] GetRawKeyForMigration()
+    {
+        if (!File.Exists(_keyPath)) return Array.Empty<byte>();
+        var protectedKey = File.ReadAllBytes(_keyPath);
+        return OsUnprotect(protectedKey);
+    }
+
+    /// <summary>
+    /// Writes a raw key (from migration package) re-protected for this machine.
+    /// Must be called before the database is opened on the new machine.
+    /// </summary>
+    public void RestoreKeyFromMigration(byte[] rawKey)
+    {
+        var protected_ = OsProtect(rawKey);
+        File.WriteAllBytes(_keyPath, protected_);
+        OsRestrictFilePermissions(_keyPath);
+        ArchLogger.LogInfo("[EncryptedStore] DB key restored from migration package");
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

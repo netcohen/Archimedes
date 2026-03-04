@@ -1,11 +1,12 @@
 namespace Archimedes.Core;
 
 /// <summary>
-/// Phase 22+24+27 – Chat UI: Self-contained HTML for the Archimedes chat interface.
+/// Phase 22+24+27+28 – Chat UI: Self-contained HTML for the Archimedes chat interface.
 /// Served at GET /chat. No external dependencies — vanilla HTML/CSS/JS only.
 /// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar,
-///           recovery dialogue cards (Phase 24), tool acquisition panel (Phase 27).
-/// Version: v0.27.0
+///           recovery dialogue cards (Phase 24), tool acquisition panel (Phase 27),
+///           machine migration panel (Phase 28).
+/// Version: v0.28.0
 /// </summary>
 public static class ChatHtml
 {
@@ -420,7 +421,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.27.0</span>
+          <span class="version">v0.28.0</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
@@ -465,6 +466,24 @@ public static class ChatHtml
             <div id="gaps-list"></div>
             <div id="legal-header" style="display:none">⚖️ אישורים</div>
             <div id="legal-list"></div>
+            <!-- Phase 28: Migration section -->
+            <div id="migration-header" style="margin-top:10px;font-size:.8rem;font-weight:600;color:#58a6ff">🚀 מיגרציה</div>
+            <div id="migration-panel" style="margin-top:4px">
+              <div style="display:flex;gap:4px;margin-bottom:4px">
+                <input id="mig-target" type="text" placeholder="\\\\server\\share  או  http://host:5051"
+                  style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:4px 6px;border-radius:4px;font-size:.72rem;direction:ltr">
+                <button onclick="startMigration(false)"
+                  style="background:#1f6feb;border:none;color:#fff;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:.72rem">
+                  העבר
+                </button>
+                <button onclick="startMigration(true)"
+                  style="background:#21262d;border:1px solid #30363d;color:#8b949e;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:.72rem"
+                  title="Dry-run — בדיקת דיסק בלבד">
+                  בדיקה
+                </button>
+              </div>
+              <div id="migration-list" style="font-size:.72rem;color:#8b949e"></div>
+            </div>
           </div>
 
         </div>
@@ -804,13 +823,56 @@ public static class ChatHtml
             } catch { /* silent */ }
           }
 
+          // ── Phase 28: Migration ──────────────────────────────────────────
+          async function startMigration(dryRun) {
+            const target = document.getElementById('mig-target').value.trim();
+            if (!target) { alert('הכנס נתיב יעד'); return; }
+            const targetType = target.startsWith('http') ? 'HTTP_URL' : 'LOCAL_PATH';
+            try {
+              const r = await fetch('/migration/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetPath: target, targetType, dryRun })
+              });
+              const d = await r.json();
+              pollMigration();
+            } catch(e) { alert('שגיאה: ' + e.message); }
+          }
+
+          async function pollMigration() {
+            try {
+              const r = await fetch('/migration/status');
+              const d = await r.json();
+              const el = document.getElementById('migration-list');
+              if (!d.migrations || d.migrations.length === 0) {
+                el.innerHTML = '<span style="color:#484f58">אין מיגרציות</span>';
+                return;
+              }
+              const statusColor = { COMPLETED:'#3fb950', FAILED:'#f85149', CHECKING_DISK:'#d29922',
+                                    SUSPENDING_TASKS:'#d29922', PACKAGING:'#58a6ff', DEPLOYING:'#58a6ff' };
+              el.innerHTML = d.migrations.slice(0, 3).map(m => {
+                const col = statusColor[m.status] || '#8b949e';
+                const label = m.dryRun ? ' (dry-run)' : '';
+                return `<div style="border-left:2px solid ${col};padding:3px 6px;margin-bottom:3px">
+                  <span style="color:${col}">${m.status}</span>${label}<br>
+                  <span style="direction:ltr;font-size:.68rem">${esc(m.targetPath)}</span><br>
+                  ${m.error ? `<span style="color:#f85149;font-size:.68rem">${esc(m.error)}</span><br>` : ''}
+                  <span style="color:#484f58;font-size:.65rem">
+                    💾 ${m.requiredDiskMB} MB · ${m.taskCount} tasks · ${m.migrationId}
+                  </span>
+                </div>`;
+              }).join('');
+            } catch { /* silent */ }
+          }
+
           // ── Start polling ────────────────────────────────────────────────
-          pollMetrics();   setInterval(pollMetrics,   5000);
-          pollTasks();     setInterval(pollTasks,     3000);
-          pollStatus();    setInterval(pollStatus,    2000);
-          pollRecovery();  setInterval(pollRecovery,  4000);  // Phase 24
-          pollGoals();     setInterval(pollGoals,     5000);  // Phase 26
-          pollTools();     setInterval(pollTools,     8000);  // Phase 27
+          pollMetrics();     setInterval(pollMetrics,     5000);
+          pollTasks();       setInterval(pollTasks,       3000);
+          pollStatus();      setInterval(pollStatus,      2000);
+          pollRecovery();    setInterval(pollRecovery,    4000);  // Phase 24
+          pollGoals();       setInterval(pollGoals,       5000);  // Phase 26
+          pollTools();       setInterval(pollTools,       8000);  // Phase 27
+          pollMigration();   setInterval(pollMigration,  10000);  // Phase 28
         </script>
 
         </body>

@@ -206,4 +206,31 @@ public class DeviceKeyManager
         var keys = GetOrCreateKeyPair();
         return Convert.ToBase64String(keys.PublicKey);
     }
+
+    // ── Phase 28: Migration key helpers ──────────────────────────────────────
+
+    /// <summary>
+    /// Returns the raw (unprotected) 64-byte key pair for migration packaging.
+    /// Treat these bytes as sensitive — protect the migration zip during transfer.
+    /// </summary>
+    public byte[] GetRawKeysForMigration()
+    {
+        if (!File.Exists(_keyPath)) return Array.Empty<byte>();
+        var protected_ = File.ReadAllBytes(_keyPath);
+        return OsUnprotect(protected_);
+    }
+
+    /// <summary>
+    /// Restores raw key pair bytes from a migration package,
+    /// re-protecting them with this machine's OS key protection.
+    /// Forces a reload on next GetOrCreateKeyPair() call.
+    /// </summary>
+    public void RestoreKeysFromMigration(byte[] rawKeys)
+    {
+        var protected_ = OsProtect(rawKeys);
+        File.WriteAllBytes(_keyPath, protected_);
+        OsRestrictFilePermissions(_keyPath);
+        _keyPair = null; // force reload on next access
+        ArchLogger.LogInfo("[DeviceKeyManager] Keys restored from migration package");
+    }
 }
