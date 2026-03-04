@@ -1871,38 +1871,82 @@ The Chat UI is how the user interacts with that capability directly.
 
 ---
 
-### Phase 27 - Integrations (WhatsApp, Sheets, Calendar, Email)
+### Phase 27 - Autonomous Tool Acquisition ✅
 
-**What:** The hands of the system - real-world integrations.
+**What:** Archimedes searches for, evaluates, and installs new capabilities autonomously.
 
-- WhatsApp Desktop automation
-- Google Sheets read/write
-- Calendar event management
-- Email read and send
+**Note:** Originally planned as "Integrations (WhatsApp, Sheets, Calendar, Email)".
+Replaced with Autonomous Tool Acquisition — a foundational layer enabling Archimedes
+to acquire ANY integration autonomously, not only predefined ones.
 
-Only here - because by Phase 27 the system has judgment, memory, and failure recovery.
+**Done:**
+- `SearchOrchestrator.cs` — multi-source tool search (Surface / Deep / Dark)
+- `ToolEvaluator.cs` — risk + legality assessment before acquisition
+- `ToolAcquisitionEngine.cs` — orchestrates search → evaluate → install pipeline
+- `ToolInstaller.cs` — LLM-powered script generation for acquired tools
+- `ToolGapDetector.cs` — detects missing capabilities during task execution
+- `LegalityChecker.cs` — LLM legal review + user approval flow for risky tools
+- `ToolStore.cs` + `ToolModels.cs` — persistence and data models
+
+**Gate:** Included in Phase 28 gate (69/69 PASS)
 
 ---
 
-### Phase 28 - Machine Migration (Octopus)
+### Phase 28 - Machine Migration (Octopus) ✅
 
 **What:** The system can move itself between machines safely.
 
-- Check target disk space before starting
-- Suspend or finish tasks by priority before migration
-- Self-package + continuation log (exact state snapshot)
-- Self-deploy on new machine
-- Resume from exact stopping point
+**Done:**
+- `MigrationEngine.cs` — full lifecycle (check → suspend → package → deploy → resume)
+- `MigrationStatePackager.cs` — zip packaging, `GetDetailedEstimate()`, `BinPack()` for split volumes
+- `MigrationDeployer.cs` — local file copy or sequential HTTP POST per volume
+- `MigrationResumeEngine.cs` — receives + restores state on target machine
+- `MigrationDiskChecker.cs` — verifies free disk before starting
+- `GET /migration/estimate` — pre-flight size breakdown (DB, procedures, tools, goals)
+- `maxVolumeSizeMB` — automatic split into N volumes (First-Fit Decreasing)
+- Chat UI: estimate panel, volume size input, migration status
+
+**Gate (Phase 28):** 42/42 PASS
+**Gate (Phase 28.1 — estimate + split-volume):** 69/69 PASS
 
 ---
 
-### Phase 29 - App Self-Development
+### Phase 29 - App Self-Development ✅
 
-**What:** Archimedes can extend its own Android app.
+**What:** Archimedes is a self-aware entity that improves itself 24/7, autonomously.
 
-- Generates APK updates
-- Installs via ADB / developer mode
-- App UI grows alongside system capabilities
+No idle state. The engine always has work: research, LLM benchmarking, procedure analysis,
+tool usage analysis, prompt experimentation, dataset collection, resource monitoring, self-testing.
+
+**Priority model:**
+- Lowest priority — user tasks always preempt self-improvement
+- Resource guard: throttle at CPU avg >70%, pause at CPU >90%, resume at avg <50%
+- Safe pause/resume: checkpoint saved on preemption, resumed from same point
+- User can redirect focus via chat: POST /selfimprove/redirect
+- Core code changes → git commit + push (audit trail for user review)
+- Acquired feature scripts → local only, NOT committed to git
+
+**New files:**
+- `SelfImprovementEngine.cs` — always-on background engine, 24/7 loop
+- `SelfImprovementModels.cs` — SelfWorkItem, SelfWorkResult, SelfWorkCheckpoint, SelfImprovementStatus
+- `SelfImprovementStore.cs` — persists history, insights, checkpoints, training dataset
+- `SelfAnalyzer.cs` — generates work items: procedure gaps, unused tools, research, benchmarks
+- `ResourceGuard.cs` — CPU/RAM monitoring, throttle/pause/resume events
+- `SelfGitManager.cs` — git commit/push of Core .cs self-patches only
+
+**Work types:**
+ANALYZE_PROCEDURES, BENCHMARK_LLM, RESEARCH_WEB, COLLECT_DATASET,
+SELF_TEST, ANALYZE_RESOURCES, ANALYZE_TOOL_USAGE, EXPERIMENT_PROMPT, PATCH_CORE_CODE
+
+**Endpoints:**
+- `GET /selfimprove/status` — engine state, CPU, current work, last insight
+- `GET /selfimprove/history` — completed work item history
+- `GET /selfimprove/insights` — accumulated findings
+- `GET /selfimprove/git-log` — self-patch commit history
+- `POST /selfimprove/redirect` — user redirects focus topic
+- `POST /selfimprove/pause` / `/resume` — manual control
+
+**Chat UI v0.29.0:** selfdev-bar shows current self-improvement activity below status bar
 
 ---
 

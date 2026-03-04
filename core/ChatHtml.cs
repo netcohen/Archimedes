@@ -6,7 +6,7 @@ namespace Archimedes.Core;
 /// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar,
 ///           recovery dialogue cards (Phase 24), tool acquisition panel (Phase 27),
 ///           machine migration panel with pre-flight estimate + split-volume support (Phase 28).
-/// Version: v0.28.1
+/// Version: v0.29.0
 /// </summary>
 public static class ChatHtml
 {
@@ -421,7 +421,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.28.1</span>
+          <span class="version">v0.29.0</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
@@ -508,6 +508,8 @@ public static class ChatHtml
           <div class="spin" id="spin"></div>
           <span id="status-txt">מוכן</span>
         </div>
+        <!-- ── Self-improvement status (Phase 29) ────────────────────────── -->
+        <div id="selfdev-bar" style="font-size:11px;color:#888;padding:2px 8px;min-height:16px;"></div>
 
         <script>
           // ── Helpers ─────────────────────────────────────────────────────
@@ -590,6 +592,7 @@ public static class ChatHtml
               const d    = await r.json();
               const spin = document.getElementById('spin');
               const txt  = document.getElementById('status-txt');
+              const sdb  = document.getElementById('selfdev-bar');
               if (d.active) {
                 spin.classList.add('on');
                 txt.textContent = d.description || 'עובד...';
@@ -597,7 +600,17 @@ public static class ChatHtml
                 spin.classList.remove('on');
                 txt.textContent = 'מוכן';
               }
+              // Phase 29: self-improvement status
+              if (sdb) sdb.textContent = d.selfDev || '';
             } catch { /* silent */ }
+          }
+
+          // Phase 29: redirect self-improvement focus
+          async function redirectSelfDev(topic) {
+            if (!topic) topic = prompt('נושא לפיתוח עצמי:');
+            if (!topic) return;
+            await fetch('/selfimprove/redirect', { method: 'POST',
+              headers: { 'Content-Type': 'text/plain' }, body: topic });
           }
 
           // ── Polling: recovery dialogues (Phase 24) ──────────────────────

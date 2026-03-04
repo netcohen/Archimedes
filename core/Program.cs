@@ -91,6 +91,16 @@ var storageManager = new StorageManager(storageConfig);
 // Phase 19: Observability
 var traceService = new TraceService();
 
+// Phase 29: Autonomous Self-Improvement Engine (24/7, lowest priority)
+var selfImprovementStore  = new SelfImprovementStore();
+var resourceGuard         = new ResourceGuard();
+var selfAnalyzer          = new SelfAnalyzer(procedureStore, toolStore, traceService);
+var selfGitManager        = new SelfGitManager();
+var selfImprovementEngine = new SelfImprovementEngine(
+    selfAnalyzer, selfImprovementStore, resourceGuard,
+    procedureStore, toolStore, traceService, llmAdapter, selfGitManager);
+selfImprovementEngine.Start();
+
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
 
@@ -848,12 +858,23 @@ app.MapGet("/system/metrics", () =>
         uptimeSeconds = SystemMetricsHelper.GetUptimeSeconds()
     }));
 
-// GET /status/current — what Archimedes is doing right now (driven by active traces)
+// GET /status/current — what Archimedes is doing right now (task + self-improvement)
 app.MapGet("/status/current", () =>
 {
-    var activity = traceService.GetLatestActivity();
+    var activity    = traceService.GetLatestActivity();
+    var selfDevDesc = selfImprovementEngine.GetCurrentActivityDescription();
+
     if (activity == null)
-        return Results.Json(new { active = false, endpoint = (string?)null, step = (string?)null, description = (string?)null });
+    {
+        return Results.Json(new
+        {
+            active      = selfDevDesc != null,
+            endpoint    = (string?)null,
+            step        = (string?)null,
+            description = (string?)null,
+            selfDev     = selfDevDesc
+        });
+    }
 
     var (endpoint, stepName) = activity.Value;
     var description = stepName switch
@@ -869,7 +890,8 @@ app.MapGet("/status/current", () =>
         active      = true,
         endpoint,
         step        = stepName,
-        description
+        description,
+        selfDev     = selfDevDesc
     });
 });
 
@@ -2193,10 +2215,58 @@ app.MapPost("/migration/receive", async (HttpRequest req) =>
     return Results.Json(new { ok, message = ok ? "Migration package received and applied" : "Package received but resume failed" });
 });
 
+// ── Phase 29: Autonomous Self-Improvement ──────────────────────────────────────
+
+// GET /selfimprove/status — current engine state, CPU, insights
+app.MapGet("/selfimprove/status", () =>
+    Results.Json(selfImprovementEngine.GetStatus()));
+
+// GET /selfimprove/history — history of completed work items
+app.MapGet("/selfimprove/history", (int? limit) =>
+    Results.Json(selfImprovementStore.GetHistory(limit ?? 50)));
+
+// GET /selfimprove/insights — accumulated insights / findings
+app.MapGet("/selfimprove/insights", (int? limit) =>
+    Results.Json(selfImprovementStore.GetInsights(limit ?? 20)));
+
+// GET /selfimprove/git-log — list of self-patch commits
+app.MapGet("/selfimprove/git-log", () =>
+    Results.Json(new { commits = selfGitManager.GetSelfPatchHistory() }));
+
+// POST /selfimprove/redirect — user redirects self-improvement focus
+app.MapPost("/selfimprove/redirect", async (HttpRequest req) =>
+{
+    using var sr = new StreamReader(req.Body);
+    var topic    = (await sr.ReadToEndAsync()).Trim();
+    if (string.IsNullOrWhiteSpace(topic))
+        return Results.BadRequest("topic required");
+    selfImprovementEngine.RedirectFocus(topic);
+    return Results.Json(new { ok = true, topic });
+});
+
+// POST /selfimprove/pause — manual pause
+app.MapPost("/selfimprove/pause", () =>
+{
+    selfImprovementEngine.NotifyUserTaskStarted(); // borrow the signal
+    return Results.Json(new { ok = true, status = "paused" });
+});
+
+// POST /selfimprove/resume — manual resume
+app.MapPost("/selfimprove/resume", () =>
+{
+    selfImprovementEngine.NotifyUserTaskCompleted();
+    return Results.Json(new { ok = true, status = "resumed" });
+});
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
-app.Lifetime.ApplicationStopping.Register(() => { llmAdapter.Dispose(); goalRunner.Stop(); });
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    llmAdapter.Dispose();
+    goalRunner.Stop();
+    selfImprovementEngine.Stop();
+});
 app.Run();
 
 // ── Phase 22: Chat request model ───────────────────────────────────────────
