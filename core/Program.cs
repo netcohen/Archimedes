@@ -43,6 +43,20 @@ var availabilityEngine = new AvailabilityEngine(availabilityStore);
 
 var planner = new Planner(llmAdapter, policyEngine, procedureStore);
 
+// Phase 27: Autonomous Tool Acquisition
+var toolStore          = new ToolStore();
+var sourceStore        = new SourceStore();
+var sourceIntelligence = new SourceIntelligence(sourceStore);
+var acquisitionHttp    = httpClientFactory.CreateClient();
+var searchOrchestrator = new SearchOrchestrator(acquisitionHttp, llmAdapter, sourceIntelligence);
+var toolEvaluator      = new ToolEvaluator(llmAdapter, acquisitionHttp);
+var legalityChecker    = new LegalityChecker(llmAdapter, toolStore);
+var toolInstaller      = new ToolInstaller(toolStore, procedureStore, llmAdapter);
+var toolGapDetector    = new ToolGapDetector(toolStore, procedureStore);
+var toolAcquisitionEngine = new ToolAcquisitionEngine(
+    toolGapDetector, searchOrchestrator, toolEvaluator,
+    legalityChecker, toolInstaller, toolStore, sourceIntelligence);
+
 // Phase 26: Goal Layer + Adaptive Planner
 var goalStore  = new GoalStore();
 var goalEngine = new GoalEngine(goalStore, taskService, llmAdapter, availabilityEngine, failureDialogueStore);
@@ -1866,6 +1880,179 @@ app.MapDelete("/goals/{id}", (string id) =>
 
     goalStore.Delete(id);
     return Results.Json(new { ok = true, goalId = id });
+});
+
+// ── Phase 27: Autonomous Tool Acquisition ──────────────────────────────────────
+
+// GET /tools — list all acquired tools
+app.MapGet("/tools", () =>
+{
+    var tools = toolAcquisitionEngine.GetAllTools();
+    return Results.Json(new
+    {
+        count = tools.Count,
+        tools = tools.Select(t => new
+        {
+            toolId      = t.ToolId,
+            capability  = t.Capability,
+            name        = t.Name,
+            strategy    = t.Strategy.ToString(),
+            risk        = t.Risk.ToString(),
+            sourceType  = t.SourceType.ToString(),
+            usageCount  = t.UsageCount,
+            reliability = t.ReliabilityScore,
+            acquiredAt  = t.AcquiredAt
+        })
+    });
+});
+
+// GET /tools/gaps — list active capability gaps
+app.MapGet("/tools/gaps", () =>
+{
+    var gaps = toolAcquisitionEngine.GetAllGaps();
+    return Results.Json(new
+    {
+        count = gaps.Count,
+        gaps  = gaps.Select(g => new
+        {
+            gapId      = g.GapId,
+            capability = g.Capability,
+            status     = g.Status.ToString(),
+            detectedAt = g.DetectedAt,
+            resolvedAt = g.ResolvedAt,
+            message    = g.UserMessage
+        })
+    });
+});
+
+// GET /tools/legal/pending — pending legal approvals
+app.MapGet("/tools/legal/pending", () =>
+{
+    var pending = toolAcquisitionEngine.GetPendingApprovals();
+    return Results.Json(new
+    {
+        count    = pending.Count,
+        approvals = pending.Select(a => new
+        {
+            approvalId  = a.ApprovalId,
+            gapId       = a.GapId,
+            capability  = a.Capability,
+            userMessage = a.UserMessage,
+            legalIssue  = a.LegalIssue,
+            legalBasis  = a.LegalBasis,
+            createdAt   = a.CreatedAt
+        })
+    });
+});
+
+// POST /tools/legal/{approvalId}/decide — user responds to legal approval
+app.MapPost("/tools/legal/{approvalId}/decide", async (string approvalId, HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    var doc       = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+
+    var decisionStr = doc.RootElement.TryGetProperty("decision", out var d)
+        ? d.GetString() ?? "" : "";
+    var userNote    = doc.RootElement.TryGetProperty("note", out var n)
+        ? n.GetString() : null;
+
+    var decision = decisionStr.ToUpperInvariant() switch
+    {
+        "APPROVED"          => ApprovalDecision.APPROVED,
+        "REJECTED"          => ApprovalDecision.REJECTED,
+        "WAITING_RESEARCH"  => ApprovalDecision.WAITING_RESEARCH,
+        _                   => (ApprovalDecision?)null
+    };
+
+    if (decision == null)
+        return Results.BadRequest("decision must be APPROVED | REJECTED | WAITING_RESEARCH");
+
+    var tool = await toolAcquisitionEngine.ResolveLegalDecisionAsync(
+        approvalId, decision.Value, userNote);
+
+    return Results.Json(new
+    {
+        ok         = true,
+        decision   = decision.ToString(),
+        toolId     = tool?.ToolId,
+        toolName   = tool?.Name,
+        acquired   = tool != null
+    });
+});
+
+// POST /tools/acquire — trigger acquisition for a capability (non-blocking).
+// Returns immediately with gapId; acquisition runs in background.
+// Poll GET /tools/gaps to track progress.
+app.MapPost("/tools/acquire", async (HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    var doc       = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+
+    var capability = doc.RootElement.TryGetProperty("capability", out var c)
+        ? c.GetString() ?? "" : "";
+    var context    = doc.RootElement.TryGetProperty("context", out var ctx)
+        ? ctx.GetString() ?? "" : "";
+
+    if (string.IsNullOrWhiteSpace(capability))
+        return Results.BadRequest("capability required");
+
+    // Already acquired? Return immediately.
+    var existing = toolGapDetector.GetTool(capability);
+    if (existing != null)
+    {
+        return Results.Json(new
+        {
+            ok        = true,
+            toolId    = existing.ToolId,
+            name      = existing.Name,
+            strategy  = existing.Strategy.ToString(),
+            capability,
+            gapId     = (string?)null,
+            status    = "ALREADY_ACQUIRED"
+        });
+    }
+
+    // Register gap immediately (synchronous) so it appears in /tools/gaps now.
+    var gap = toolGapDetector.Detect(capability, context);
+
+    // Fire-and-forget search in background.
+    _ = Task.Run(async () =>
+    {
+        try { await toolAcquisitionEngine.AcquireAsync(capability, context); }
+        catch (Exception ex) { ArchLogger.LogWarn($"[Acquire BG] {capability}: {ex.Message}"); }
+    });
+
+    return Results.Json(new
+    {
+        ok        = gap != null,
+        toolId    = (string?)null,
+        name      = (string?)null,
+        strategy  = (string?)null,
+        capability,
+        gapId     = gap?.GapId,
+        status    = "SEARCHING"
+    });
+});
+
+// GET /tools/sources — source intelligence stats
+app.MapGet("/tools/sources", () =>
+{
+    var sources = toolAcquisitionEngine.GetSourceStats();
+    return Results.Json(new
+    {
+        count       = sources.Count,
+        torAvailable = toolAcquisitionEngine.IsTorAvailable,
+        sources     = sources.Select(s => new
+        {
+            sourceId    = s.SourceId,
+            sourceType  = s.SourceType.ToString(),
+            totalSearches = s.TotalSearches,
+            reliability   = Math.Round(s.ReliabilityScore, 3),
+            lastUsed      = s.LastUsed
+        })
+    });
 });
 
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;

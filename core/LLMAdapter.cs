@@ -264,6 +264,39 @@ public class LLMAdapter : IDisposable
     }
 
     // -----------------------------------------------------------------------
+    // Phase 27: General-purpose LLM query
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// General-purpose LLM call. Used by Phase 27 components (ToolEvaluator,
+    /// LegalityChecker, SearchOrchestrator, ToolInstaller) for ad-hoc queries.
+    /// Falls back to empty string if model unavailable.
+    /// </summary>
+    public async Task<string> AskAsync(
+        string systemPrompt, string userContent, int maxTokens = 512)
+    {
+        ArchLogger.LogInfo($"[LLM] AskAsync: sys={systemPrompt[..Math.Min(60, systemPrompt.Length)]}...");
+
+        if (!EnsureModel())
+        {
+            ArchLogger.LogWarn("[LLM] AskAsync: model not available, returning empty");
+            return string.Empty;
+        }
+
+        try
+        {
+            var sanitized = SanitizeForLLM(userContent);
+            var raw       = await RunInference(systemPrompt, sanitized, maxTokens);
+            return raw ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn($"[LLM] AskAsync failed: {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Heuristic fallbacks (always available even without model)
     // -----------------------------------------------------------------------
 

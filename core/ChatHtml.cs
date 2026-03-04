@@ -1,10 +1,11 @@
 namespace Archimedes.Core;
 
 /// <summary>
-/// Phase 22+24 – Chat UI: Self-contained HTML for the Archimedes chat interface.
+/// Phase 22+24+27 – Chat UI: Self-contained HTML for the Archimedes chat interface.
 /// Served at GET /chat. No external dependencies — vanilla HTML/CSS/JS only.
 /// Features: RTL Hebrew, chat area, system metrics bar, tasks panel, status bar,
-///           recovery dialogue cards (Phase 24).
+///           recovery dialogue cards (Phase 24), tool acquisition panel (Phase 27).
+/// Version: v0.27.0
 /// </summary>
 public static class ChatHtml
 {
@@ -343,6 +344,66 @@ public static class ChatHtml
             .goal-item .g-progress-bar { height: 100%; background: #388bfd; border-radius: 2px; }
             #no-goals { color: #484f58; font-size: 0.78rem; text-align: center; padding: 12px 8px; }
 
+            /* ── Tools section (Phase 27) ─────────────────────────────── */
+            #tools-header, #gaps-header, #legal-header {
+              padding: 8px 12px 4px;
+              font-size: 0.72rem;
+              font-weight: 700;
+              color: #8b949e;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              border-top: 1px solid #30363d;
+            }
+            #tools-list, #gaps-list, #legal-list {
+              padding: 4px 8px;
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+              max-height: 120px;
+              overflow-y: auto;
+            }
+            .tool-item {
+              background: #161b22;
+              border: 1px solid #30363d;
+              border-radius: 6px;
+              padding: 5px 8px;
+              font-size: 0.74rem;
+              display: flex;
+              align-items: center;
+              gap: 6px;
+            }
+            .tool-cap  { color: #58a6ff; font-weight: 600; }
+            .tool-name { color: #8b949e; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .tool-risk-safe { color: #3fb950; }
+            .tool-risk-mgmt { color: #d29922; }
+            .tool-risk-dang { color: #f85149; }
+            .gap-item {
+              background: #21262d;
+              border: 1px solid #d2992244;
+              border-radius: 6px;
+              padding: 5px 8px;
+              font-size: 0.73rem;
+              color: #d29922;
+            }
+            .legal-item {
+              background: #21262d;
+              border: 1px solid #388bfd44;
+              border-radius: 6px;
+              padding: 5px 8px;
+              font-size: 0.73rem;
+              color: #e6edf3;
+            }
+            .legal-btn {
+              font-size: 0.68rem;
+              padding: 2px 7px;
+              border-radius: 4px;
+              border: none;
+              cursor: pointer;
+              margin-right: 4px;
+            }
+            .legal-btn-approve { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+            .legal-btn-reject  { background: #f8514922; color: #f85149; border: 1px solid #f8514944; }
+
             /* ── Scrollbar ────────────────────────────────────────────── */
             ::-webkit-scrollbar       { width: 5px; }
             ::-webkit-scrollbar-track { background: transparent; }
@@ -359,7 +420,7 @@ public static class ChatHtml
           <span class="metric">מעבד: <span class="val" id="m-cpu">—</span></span>
           <span class="metric">זיכרון: <span class="val" id="m-ram">—</span></span>
           <span class="metric">זמן פעולה: <span class="val" id="m-up">—</span></span>
-          <span class="version">v0.26.0</span>
+          <span class="version">v0.27.0</span>
         </div>
 
         <!-- ── Recovery dialogues (Phase 24) ───────────────────────────── -->
@@ -395,6 +456,15 @@ public static class ChatHtml
             <div id="goals-list">
               <div id="no-goals">אין מטרות פעילות</div>
             </div>
+            <!-- Phase 27: Tools section -->
+            <div id="tools-header">🔧 כלים</div>
+            <div id="tools-list">
+              <div id="no-tools" style="color:#8b949e;font-size:.75rem;padding:6px 0">אין כלים נרכשים</div>
+            </div>
+            <div id="gaps-header" style="display:none">⚠️ חסרים</div>
+            <div id="gaps-list"></div>
+            <div id="legal-header" style="display:none">⚖️ אישורים</div>
+            <div id="legal-list"></div>
           </div>
 
         </div>
@@ -655,12 +725,92 @@ public static class ChatHtml
             } catch { /* silent */ }
           }
 
+          // ── Phase 27: Tool acquisition panel ─────────────────────────────
+          async function pollTools() {
+            try {
+              const [toolsResp, gapsResp, legalResp] = await Promise.all([
+                fetch('/tools'), fetch('/tools/gaps'), fetch('/tools/legal/pending')
+              ]);
+              const toolsData = await toolsResp.json();
+              const gapsData  = await gapsResp.json();
+              const legalData = await legalResp.json();
+
+              // Tools list
+              const toolsList = document.getElementById('tools-list');
+              if (toolsData.tools && toolsData.tools.length > 0) {
+                const RISK_CSS = { SAFE: 'tool-risk-safe', MANAGEABLE: 'tool-risk-mgmt', DANGEROUS: 'tool-risk-dang' };
+                const RISK_ICO = { SAFE: '✓', MANAGEABLE: '⚠', DANGEROUS: '✗' };
+                toolsList.innerHTML = toolsData.tools.map(t =>
+                  `<div class="tool-item">
+                    <span class="${RISK_CSS[t.risk] || 'tool-risk-mgmt'}" title="${esc(t.risk)}">${RISK_ICO[t.risk]||'?'}</span>
+                    <span class="tool-cap">${esc(t.capability)}</span>
+                    <span class="tool-name">${esc(t.name)}</span>
+                  </div>`
+                ).join('');
+              } else {
+                toolsList.innerHTML = '<div id="no-tools" style="color:#484f58;font-size:.75rem;padding:6px 0">אין כלים נרכשים</div>';
+              }
+
+              // Active gaps
+              const gapsHeader = document.getElementById('gaps-header');
+              const gapsList   = document.getElementById('gaps-list');
+              const activeGaps = (gapsData.gaps || []).filter(g => g.status === 'SEARCHING' || g.status === 'AWAITING_LEGAL');
+              if (activeGaps.length > 0) {
+                gapsHeader.style.display = '';
+                gapsList.innerHTML = activeGaps.map(g =>
+                  `<div class="gap-item">
+                    🔍 ${esc(g.capability)}
+                    <span style="font-size:.68rem;color:#8b949e"> — ${esc(g.status)}</span>
+                  </div>`
+                ).join('');
+              } else {
+                gapsHeader.style.display = 'none';
+                gapsList.innerHTML = '';
+              }
+
+              // Legal approvals
+              const legalHeader = document.getElementById('legal-header');
+              const legalList   = document.getElementById('legal-list');
+              const pending = legalData.approvals || [];
+              if (pending.length > 0) {
+                legalHeader.style.display = '';
+                legalList.innerHTML = pending.map(a =>
+                  `<div class="legal-item">
+                    <div style="margin-bottom:4px;font-weight:600">${esc(a.capability)}</div>
+                    <div style="font-size:.7rem;color:#8b949e;margin-bottom:4px">${esc((a.userMessage||'').substring(0,100))}</div>
+                    <div>
+                      <button class="legal-btn legal-btn-approve"
+                        onclick="decideLegal('${esc(a.approvalId)}','APPROVED')">אשר</button>
+                      <button class="legal-btn legal-btn-reject"
+                        onclick="decideLegal('${esc(a.approvalId)}','REJECTED')">דחה</button>
+                    </div>
+                  </div>`
+                ).join('');
+              } else {
+                legalHeader.style.display = 'none';
+                legalList.innerHTML = '';
+              }
+            } catch { /* silent */ }
+          }
+
+          async function decideLegal(approvalId, decision) {
+            try {
+              await fetch(`/tools/legal/${approvalId}/decide`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ decision })
+              });
+              pollTools();
+            } catch { /* silent */ }
+          }
+
           // ── Start polling ────────────────────────────────────────────────
           pollMetrics();   setInterval(pollMetrics,   5000);
           pollTasks();     setInterval(pollTasks,     3000);
           pollStatus();    setInterval(pollStatus,    2000);
           pollRecovery();  setInterval(pollRecovery,  4000);  // Phase 24
           pollGoals();     setInterval(pollGoals,     5000);  // Phase 26
+          pollTools();     setInterval(pollTools,     8000);  // Phase 27
         </script>
 
         </body>
