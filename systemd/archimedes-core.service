@@ -1,8 +1,8 @@
 [Unit]
 Description=Archimedes Core Agent Service
 Documentation=https://github.com/your-org/archimedes
-After=network.target
-Wants=network.target
+After=network.target archimedes-net.service
+Wants=network.target archimedes-net.service
 
 [Service]
 Type=simple
@@ -22,6 +22,18 @@ ExecStart=/usr/bin/dotnet /opt/archimedes/core/Archimedes.Core.dll
 Environment=DOTNET_ENVIRONMENT=Production
 Environment=ASPNETCORE_URLS=http://localhost:5051
 
+# Net service location (for AndroidBridge, AppUpdater, SelfImprovementEngine)
+Environment=ARCHIMEDES_NET_URL=http://localhost:5052
+
+# LLM model path (set to actual path if different)
+Environment=ARCHIMEDES_MODEL_PATH=/home/archimedes/.archimedes/models/llama3.2-3b.gguf
+
+# GPU layers for LLM (0 = CPU only; increase if GPU available)
+Environment=LLM_GPU_LAYERS=0
+
+# Override via /etc/archimedes/core.env for sensitive values (Firebase, etc.)
+# EnvironmentFile=/etc/archimedes/core.env
+
 # Restart policy
 Restart=on-failure
 RestartSec=5s
@@ -33,7 +45,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/archimedes/.local/share/Archimedes
+ReadWritePaths=/home/archimedes/.local/share/Archimedes /home/archimedes/.archimedes
 
 # Logging — output goes to journald
 StandardOutput=journal

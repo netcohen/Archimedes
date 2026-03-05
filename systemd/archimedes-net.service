@@ -1,0 +1,45 @@
+[Unit]
+Description=Archimedes Net Service (FCM relay, Firestore poller, browser bridge)
+Documentation=https://github.com/your-org/archimedes
+After=network.target
+
+[Service]
+Type=simple
+
+# Run as the archimedes system user (created by install.sh)
+User=archimedes
+Group=archimedes
+
+# Working directory — published Net bundle
+WorkingDirectory=/opt/archimedes/net
+
+# Node.js entry point
+ExecStart=/usr/bin/node /opt/archimedes/net/dist/index.js
+
+# Environment — override via /etc/archimedes/net.env if needed
+Environment=PORT=5052
+Environment=CORE_URL=http://localhost:5051
+Environment=NODE_ENV=production
+
+# Firebase (optional) — set GOOGLE_APPLICATION_CREDENTIALS in /etc/archimedes/net.env
+# EnvironmentFile=/etc/archimedes/net.env
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+# Logging — output goes to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=archimedes-net
+
+[Install]
+WantedBy=multi-user.target
