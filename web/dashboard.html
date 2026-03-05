@@ -392,10 +392,19 @@ async function poll() {
     sv('s-core', online ? 'online' : 'offline', online ? 'ok' : 'err');
 
     // ── LLM health ──
+    // LLMHealthResult shape: { Available, Model, Runtime, Error }
+    // Also handles legacy shapes: { status, loaded, Status }
     const llm = await api('/llm/health');
-    const llmOk = llm && (llm.status === 'ok' || llm.loaded === true || llm.Status === 'ok');
+    const llmOk = llm && (
+        llm.Available === true || llm.available === true ||
+        llm.status === 'ok'    || llm.Status === 'ok'    ||
+        llm.loaded  === true
+    );
+    const llmModel = llm && (llm.Model || llm.model || '');
     sv('s-llm', llmOk ? 'loaded' : (llm ? 'loading…' : 'offline'), llmOk ? 'ok' : 'warn');
-    g('llm-badge').textContent = 'LLM: ' + (llmOk ? 'OK' : '…');
+    g('llm-badge').textContent = 'LLM: ' + (llmOk
+        ? (llmModel ? llmModel.replace('.gguf','').split('-').slice(-2).join('-') : 'OK')
+        : '…');
 
     // ── OS status ──
     const os = await api('/os/status');
@@ -518,6 +527,23 @@ function chatLine(text, cls = 'bot') {
     chatMsgs.scrollTop = chatMsgs.scrollHeight;
 }
 
+// Friendly labels for known UNKNOWN-intent responses
+function friendlyReply(d) {
+    const reply  = d.reply  || d.error || JSON.stringify(d);
+    const intent = d.intent || '';
+    // If intent is UNKNOWN and LLM is loaded — explain what Archimedes can do
+    if (intent === 'UNKNOWN' || intent === 'unknown') {
+        return 'שלום! אני ארכימדס — סוכן AI אוטונומי.\n' +
+               'אני מבין פקודות כמו:\n' +
+               '  • "תייצא את site.com"\n' +
+               '  • "תנטר את site.com כל שעה"\n' +
+               '  • "הורד קובץ מ-url"\n' +
+               '  • "מטרה: עקוב אחרי X תמיד"\n' +
+               'מה תרצה שאעשה?';
+    }
+    return reply;
+}
+
 async function sendChat() {
     const msg = (chatIn.value || '').trim();
     if (!msg) return;
@@ -525,22 +551,32 @@ async function sendChat() {
     chatLine('❯ ' + msg, 'user');
     chatIn.disabled  = true;
     chatBtn.disabled = true;
+    chatLine('חושב… (LLM 3B על CPU — עד 90 שניות)', 'dim');
 
     try {
         const r = await fetch('/chat/message', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ message: msg }),
-            signal:  AbortSignal.timeout(20000)
+            signal:  AbortSignal.timeout(90000)   // 90s — LLM on CPU is slow
         });
+        // Remove the "thinking…" line
+        const thinking = chatMsgs.lastChild;
+        if (thinking && thinking.textContent.includes('חושב')) chatMsgs.removeChild(thinking);
+
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
-        const reply = d.reply || d.error || JSON.stringify(d);
-        chatLine(reply, 'bot');
-        if (d.taskId) chatLine('↳ משימה: ' + d.taskId, 'dim');
-        if (d.goalId) chatLine('↳ מטרה:  ' + d.goalId, 'dim');
+        chatLine(friendlyReply(d), 'bot');
+        if (d.taskId) chatLine('↳ משימה נוצרה: ' + d.taskId, 'dim');
+        if (d.goalId) chatLine('↳ מטרה נוצרה: '  + d.goalId, 'dim');
     } catch (e) {
-        chatLine('שגיאה: ' + e.message, 'err');
+        const thinking2 = chatMsgs.lastChild;
+        if (thinking2 && thinking2.textContent.includes('חושב')) chatMsgs.removeChild(thinking2);
+        if (e.name === 'TimeoutError' || e.message.includes('timed out') || e.message.includes('signal')) {
+            chatLine('הLLM עדיין טוען את המודל — נסה שוב בעוד דקה', 'warn');
+        } else {
+            chatLine('שגיאה: ' + e.message, 'err');
+        }
     } finally {
         chatIn.disabled  = false;
         chatBtn.disabled = false;
@@ -553,7 +589,7 @@ chatBtn.addEventListener('click', sendChat);
 
 // Greet + focus
 setTimeout(() => {
-    chatLine('מוכן לקבל הוראות. דוגמה: "תעקוב אחרי site.com" או "מה הסטטוס שלך?"', 'dim');
+    chatLine('מוכן. דוגמאות: "תייצא את ynet.co.il" | "מטרה: נטר site.com כל שעה"', 'dim');
     if (chatIn) chatIn.focus();
 }, 1500);
 </script>
