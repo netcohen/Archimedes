@@ -95,7 +95,26 @@ if ls "$MODEL_DIR"/*.gguf 2>/dev/null | grep -q .; then
     ok "Old model files removed"
 fi
 
-# ── 7. Restart Archimedes service ─────────────────────────────────────────
+# ── 7. Rebuild C# binary (required — LLMAdapter switched from LlamaSharp to Ollama) ──
+info "Rebuilding Archimedes Core (LLMAdapter → Ollama)..."
+REPO_DIR="$HOME/archimedes"
+DOTNET="$HOME/.dotnet/dotnet"
+if [ ! -f "$DOTNET" ]; then DOTNET="dotnet"; fi
+
+"$DOTNET" publish \
+    "$REPO_DIR/core/Archimedes.Core.csproj" \
+    -c Release \
+    -o "$REPO_DIR/core/bin/Release/net8.0" \
+    --nologo 2>&1 | tail -5
+
+if [ -f "$REPO_DIR/core/bin/Release/net8.0/Archimedes.Core.dll" ]; then
+    ok "Build succeeded"
+else
+    err "Build failed — check output above"
+    exit 1
+fi
+
+# ── 8. Restart Archimedes service ─────────────────────────────────────────
 info "Restarting Archimedes service..."
 sudo systemctl restart archimedes
 sleep 5

@@ -33,25 +33,26 @@ echo "Changed files:"
 echo "$CHANGED" | sed 's/^/  /'
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  1. MODEL UPGRADE — check if bootstrap.sh now expects a different model
+#  1. OLLAMA CHECK — ensure Ollama is installed and model is pulled
 # ═══════════════════════════════════════════════════════════════════════════
-EXPECTED_FILENAME=$(grep "^MODEL_PATH=" "$REPO_DIR/scripts/bootstrap.sh" 2>/dev/null \
-    | grep -oP '[^/"]+\.gguf' | head -1)
-EXPECTED_PATH="$MODEL_DIR/$EXPECTED_FILENAME"
-CURRENT_PATH=$(grep "^ARCHIMEDES_MODEL_PATH=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-
 echo ""
-echo "--- Model check ---"
-echo "  Expected: $EXPECTED_PATH"
-echo "  Current:  $CURRENT_PATH"
+echo "--- Ollama check ---"
 
-if [ -n "$EXPECTED_FILENAME" ] && \
-   { [ "$CURRENT_PATH" != "$EXPECTED_PATH" ] || [ ! -f "$EXPECTED_PATH" ]; }; then
-    echo "  → Model upgrade needed"
-    bash "$REPO_DIR/scripts/upgrade-llm.sh"
-    echo "  → Model upgrade complete"
+OLLAMA_MODEL=$(grep "^ARCHIMEDES_OLLAMA_MODEL=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "llama3.1:8b")
+
+if ! command -v ollama &>/dev/null; then
+    echo "  → Ollama not installed — running install-ollama.sh"
+    bash "$REPO_DIR/scripts/install-ollama.sh"
 else
-    echo "  → Model OK — no upgrade needed"
+    echo "  → Ollama installed: $(ollama --version 2>/dev/null | head -1)"
+    # Ensure model is pulled
+    if ! ollama list 2>/dev/null | grep -q "${OLLAMA_MODEL%%:*}"; then
+        echo "  → Model ${OLLAMA_MODEL} not found — pulling..."
+        ollama pull "$OLLAMA_MODEL" 2>&1 | tail -3
+        echo "  → Model pulled"
+    else
+        echo "  → Model ${OLLAMA_MODEL} OK"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
