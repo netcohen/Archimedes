@@ -38,9 +38,8 @@ REPO_URL="https://github.com/netcohen/Archimedes.git"
 REPO_DIR="$HOME/archimedes"                       # where to clone the repo
 DATA_DIR="$HOME/.local/share/Archimedes"          # runtime data (db, procedures, etc.)
 MODEL_DIR="$DATA_DIR/models"
-MODEL_PATH="$MODEL_DIR/llama3.1-8b.gguf"
-MODEL_URL="https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
-MODEL_MIN_GB=4.0
+OLLAMA_MODEL="llama3.1:8b"          # model pulled via: ollama pull llama3.1:8b
+OLLAMA_URL="http://localhost:11434"  # Ollama runs as a local service
 CORE_PORT=5051
 DOTNET_CHANNEL="8.0"
 GIT_USER_NAME="Archimedes"
@@ -286,39 +285,37 @@ fi
 ok "Core binary built successfully"
 
 # =============================================================================
-#  STEP 6 — LLM model download
+#  STEP 6 — Ollama LLM runtime + model
 # =============================================================================
 
-section "Step 6 — LLM model (Llama-3.2-3B-Instruct, ~2 GB)"
+section "Step 6 — Ollama LLM runtime (replaces LlamaSharp)"
 
-mkdir -p "$MODEL_DIR"
-
-if [ -f "$MODEL_PATH" ]; then
-    MODEL_SIZE_GB=$(du -BG "$MODEL_PATH" | cut -f1 | tr -d 'G')
-    if [ "${MODEL_SIZE_GB:-0}" -ge "${MODEL_MIN_GB%.*}" ] 2>/dev/null; then
-        ok "Model already exists ($MODEL_SIZE_GB GB) — skipping download"
-    else
-        warn "Existing model file is too small (${MODEL_SIZE_GB}GB) — re-downloading"
-        rm -f "$MODEL_PATH"
-    fi
+# Install Ollama if not present
+if command -v ollama &>/dev/null; then
+    ok "Ollama already installed: $(ollama --version 2>/dev/null | head -1)"
+else
+    info "Installing Ollama..."
+    curl -fsSL https://ollama.ai/install.sh | sh
+    ok "Ollama installed"
 fi
 
-if [ ! -f "$MODEL_PATH" ]; then
-    info "Downloading LLM model... (this takes 5-20 minutes depending on connection)"
-    info "  URL: $MODEL_URL"
-    echo ""
-    wget --progress=bar:force:noscroll \
-         --header="User-Agent: Archimedes/1.0" \
-         -O "$MODEL_PATH.tmp" \
-         "$MODEL_URL" 2>&1 || {
-        err "Model download failed"
-        rm -f "$MODEL_PATH.tmp"
-        exit 1
-    }
-    mv "$MODEL_PATH.tmp" "$MODEL_PATH"
+# Enable + start Ollama service
+sudo systemctl enable ollama 2>/dev/null || true
+sudo systemctl start  ollama 2>/dev/null || true
+sleep 3
+systemctl is-active --quiet ollama && ok "Ollama service: running" \
+    || { warn "Ollama service not running — trying to start..."; sudo systemctl restart ollama; sleep 5; }
 
-    MODEL_SIZE_GB=$(du -BG "$MODEL_PATH" | cut -f1 | tr -d 'G')
-    ok "Model downloaded: ${MODEL_SIZE_GB}GB at $MODEL_PATH"
+# Pull model (skipped automatically if already present)
+info "Pulling model: $OLLAMA_MODEL (may take 10-20 minutes on first run)..."
+ollama pull "$OLLAMA_MODEL" 2>&1 | tail -5
+ok "Model ready: $OLLAMA_MODEL"
+
+# Remove old .gguf files if any (free disk space)
+if ls "$MODEL_DIR"/*.gguf 2>/dev/null | grep -q .; then
+    info "Removing old .gguf model files..."
+    rm -f "$MODEL_DIR"/*.gguf
+    ok "Old model files removed"
 fi
 
 # =============================================================================
@@ -336,11 +333,12 @@ if [ ! -f /etc/archimedes/environment ]; then
 ARCHIMEDES_REPO_ROOT=$REPO_DIR
 ARCHIMEDES_DATA_PATH=$DATA_DIR
 ARCHIMEDES_STORAGE_INTERNAL=$DATA_DIR
-ARCHIMEDES_MODEL_PATH=$MODEL_PATH
 ARCHIMEDES_PORT=$CORE_PORT
 ARCHIMEDES_LOGS_RETENTION_DAYS=7
 ARCHIMEDES_ARTIFACTS_MAX_GB=20
-# LLM_GPU_LAYERS=0   # set to -1 to use GPU (requires CUDA)
+# Ollama LLM backend
+ARCHIMEDES_OLLAMA_URL=$OLLAMA_URL
+ARCHIMEDES_OLLAMA_MODEL=$OLLAMA_MODEL
 EOF
     ok "Environment file written: /etc/archimedes/environment"
 else

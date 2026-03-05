@@ -9,8 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="LLamaSharp" Version="0.17.0" />
-    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.17.0" />
+    <!-- LLamaSharp removed — LLM now handled by Ollama (external service) -->
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.3" />
     <PackageReference Include="Sodium.Core" Version="1.4.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />

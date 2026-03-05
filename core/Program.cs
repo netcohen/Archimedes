@@ -1165,6 +1165,129 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
     return Results.Json(new { reply = hebrewReply, command = bashCommand, output = cmdOutput });
 });
 
+// POST /chat/stream — streaming chat via Server-Sent Events (SSE)
+// Tokens appear in the dashboard one-by-one as the LLM generates them.
+// Flow: LLM streams COMMAND:/RESPONSE: format → at done, execute command → send final event.
+app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
+{
+    using var sr = new StreamReader(req.Body);
+    var body     = await sr.ReadToEndAsync();
+    string message;
+    try
+    {
+        var doc = JsonDocument.Parse(body);
+        message = doc.RootElement.TryGetProperty("message", out var m) ? m.GetString() ?? "" : body;
+    }
+    catch { message = body; }
+
+    if (string.IsNullOrWhiteSpace(message))
+    { res.StatusCode = 400; return; }
+
+    availabilityEngine.RecordInteraction("chat");
+
+    // SSE headers
+    res.ContentType = "text/event-stream; charset=utf-8";
+    res.Headers["Cache-Control"]      = "no-cache";
+    res.Headers["X-Accel-Buffering"] = "no";
+    res.Headers["Connection"]         = "keep-alive";
+
+    const string streamSysPrompt =
+        "You are Archimedes, an autonomous AI agent on a dedicated Ubuntu 24.04 Linux machine. " +
+        "You have full sudo access and can run any shell command. " +
+        "Always reply in Hebrew (עברית). " +
+        "When the user asks you to DO something on the system, output EXACTLY:\n" +
+        "COMMAND: <single bash command or 'none'>\n" +
+        "RESPONSE: <your Hebrew reply>\n" +
+        "For conversational questions with no system action needed:\n" +
+        "COMMAND: none\n" +
+        "RESPONSE: <your Hebrew reply>";
+
+    // Phase 1: stream tokens
+    var sb  = new StringBuilder();
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+    try
+    {
+        await foreach (var token in llmAdapter.StreamAsync(streamSysPrompt, message, 150, cts.Token))
+        {
+            sb.Append(token);
+            var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
+            await res.WriteAsync($"data: {tokenJson}\n\n");
+            await res.Body.FlushAsync();
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        await res.WriteAsync("data: {\"type\":\"error\",\"msg\":\"timeout — ה-LLM לא הגיב בזמן\"}\n\n");
+        await res.Body.FlushAsync();
+        return;
+    }
+    catch (Exception ex)
+    {
+        var errJson = JsonSerializer.Serialize(new { type = "error", msg = ex.Message });
+        await res.WriteAsync($"data: {errJson}\n\n");
+        await res.Body.FlushAsync();
+        return;
+    }
+    finally { cts.Dispose(); }
+
+    // Phase 2: parse COMMAND:/RESPONSE:
+    var fullText    = sb.ToString().Trim();
+    string? bashCmd = null;
+    string reply    = fullText;
+
+    foreach (var line in fullText.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+    {
+        if (line.StartsWith("COMMAND:", StringComparison.OrdinalIgnoreCase))
+        {
+            var cmd = line["COMMAND:".Length..].Trim();
+            if (!string.IsNullOrEmpty(cmd) && !cmd.Equals("none", StringComparison.OrdinalIgnoreCase))
+                bashCmd = cmd;
+        }
+        else if (line.StartsWith("RESPONSE:", StringComparison.OrdinalIgnoreCase))
+        {
+            reply = line["RESPONSE:".Length..].Trim();
+        }
+    }
+
+    // Phase 3: execute command if present
+    string? cmdOut = null;
+    if (!string.IsNullOrEmpty(bashCmd))
+    {
+        ArchLogger.LogInfo($"[Chat/Stream] Executing: {bashCmd}");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", bashCmd })
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false
+            };
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            var outSb = new System.Text.StringBuilder();
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            using var cmdCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await proc.WaitForExitAsync(cmdCts.Token);
+            cmdOut = outSb.ToString().Trim();
+            if (proc.ExitCode != 0) reply += $"\n⚠ הפקודה הסתיימה עם שגיאה (קוד {proc.ExitCode}).";
+        }
+        catch (Exception ex) { cmdOut = "שגיאה: " + ex.Message; }
+    }
+
+    // Phase 4: send done event with parsed data
+    var doneJson = JsonSerializer.Serialize(new
+    {
+        type    = "done",
+        reply,
+        command = bashCmd,
+        output  = cmdOut
+    });
+    await res.WriteAsync($"data: {doneJson}\n\n");
+    await res.Body.FlushAsync();
+});
+
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────
 
 // List all stored procedures

@@ -1,10 +1,8 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
-using LLama;
-using LLama.Common;
-using LLama.Sampling;
 
 namespace Archimedes.Core;
 
@@ -34,268 +32,194 @@ public class LLMHealthResult
     public string? Error { get; set; }
 }
 
+// =============================================================================
+//  LLMAdapter — Ollama backend
+//  Calls the local Ollama service (http://localhost:11434) via HTTP.
+//  Ollama must be running: sudo systemctl status ollama
+//  Model must be pulled:   ollama pull llama3.1:8b
+// =============================================================================
 public class LLMAdapter : IDisposable
 {
-    private LLamaWeights? _weights;
-    private ModelParams? _modelParams;
-    private readonly string _modelPath;
-    private readonly int _gpuLayers;
-    private readonly object _loadLock = new();
-    private bool _modelLoaded;
+    private readonly HttpClient _http;
+    private readonly string     _ollamaBase;
+    private readonly string     _model;
 
     public LLMAdapter()
     {
-        _modelPath = Environment.GetEnvironmentVariable("ARCHIMEDES_MODEL_PATH")
-            ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Archimedes", "models", "llama3.2-3b.gguf");
+        _ollamaBase = Environment.GetEnvironmentVariable("ARCHIMEDES_OLLAMA_URL")
+            ?? "http://localhost:11434";
+        _model = Environment.GetEnvironmentVariable("ARCHIMEDES_OLLAMA_MODEL")
+            ?? "llama3.1:8b";
 
-        _gpuLayers = int.TryParse(
-            Environment.GetEnvironmentVariable("LLM_GPU_LAYERS"), out var g) ? g : 0;
+        // Timeout.InfiniteTimeSpan — each call uses its own CancellationTokenSource
+        _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        ArchLogger.LogInfo($"[LLM] Ollama adapter: base={_ollamaBase} model={_model}");
     }
 
+    public void Dispose() => _http.Dispose();
+
     // -----------------------------------------------------------------------
-    // Model lifecycle
+    // Health check
     // -----------------------------------------------------------------------
 
-    private bool EnsureModel()
+    public async Task<LLMHealthResult> HealthCheck()
     {
-        if (_modelLoaded) return _weights != null;
-
-        lock (_loadLock)
+        try
         {
-            if (_modelLoaded) return _weights != null;
-            _modelLoaded = true;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var resp = await _http.GetAsync($"{_ollamaBase}/api/tags", cts.Token);
 
-            if (!File.Exists(_modelPath))
-            {
-                ArchLogger.LogWarn($"[LLM] Model not found: {_modelPath}");
-                return false;
-            }
-
-            try
-            {
-                ArchLogger.LogInfo($"[LLM] Loading model: {Path.GetFileName(_modelPath)}");
-                _modelParams = new ModelParams(_modelPath)
+            if (!resp.IsSuccessStatusCode)
+                return new LLMHealthResult
                 {
-                    ContextSize   = 4096,   // 8B needs more context than 3B's 2048
-                    GpuLayerCount = _gpuLayers
+                    Available = false, Model = _model, Runtime = "ollama",
+                    Error = $"Ollama returned {resp.StatusCode}"
                 };
-                _weights = LLamaWeights.LoadFromFile(_modelParams);
-                ArchLogger.LogInfo("[LLM] Model loaded via LLamaSharp");
-                return true;
-            }
-            catch (Exception ex)
+
+            var json = await resp.Content.ReadAsStringAsync(cts.Token);
+            var doc  = JsonDocument.Parse(json);
+
+            bool modelFound = false;
+            var modelPrefix = _model.Split(':')[0];
+            if (doc.RootElement.TryGetProperty("models", out var models))
             {
-                ArchLogger.LogWarn($"[LLM] Model load failed: {ex.Message}");
-                return false;
-            }
-        }
-    }
-
-    public void Dispose()
-    {
-        _weights?.Dispose();
-        _weights = null;
-    }
-
-    // -----------------------------------------------------------------------
-    // Inference
-    // -----------------------------------------------------------------------
-
-    private async Task<string?> RunInference(
-        string systemPrompt, string userContent, int maxTokens = 512, int timeoutSeconds = 90)
-    {
-        if (_weights == null || _modelParams == null) return null;
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        try
-        {
-            ArchLogger.LogInfo($"[LLM] Starting inference maxTokens={maxTokens} timeout={timeoutSeconds}s");
-            var executor = new StatelessExecutor(_weights, _modelParams);
-
-            // Llama 3 Instruct chat format.
-            // NOTE: do NOT include <|begin_of_text|> — LLamaSharp adds the BOS token
-            // automatically; including it here causes a double-BOS that corrupts inference.
-            var prompt =
-                "<|start_header_id|>system<|end_header_id|>\n\n" +
-                systemPrompt +
-                "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n" +
-                userContent +
-                "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-
-            ArchLogger.LogInfo($"[LLM] Prompt len={prompt.Length}, calling InferAsync...");
-
-            // In LLamaSharp 0.17.x Temperature must go through SamplingPipeline;
-            // setting it directly on InferenceParams causes a NullReferenceException.
-            var inferParams = new InferenceParams
-            {
-                MaxTokens      = maxTokens,
-                SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.1f },
-                AntiPrompts    = new List<string>
+                foreach (var m in models.EnumerateArray())
                 {
-                    "<|eot_id|>",
-                    "<|end_of_text|>",
-                    "<|start_header_id|>"
+                    var name = m.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    if (name.StartsWith(modelPrefix, StringComparison.OrdinalIgnoreCase))
+                    { modelFound = true; break; }
                 }
+            }
+
+            return new LLMHealthResult
+            {
+                Available = modelFound,
+                Model     = _model,
+                Runtime   = "ollama",
+                Error     = modelFound ? null : $"Model '{_model}' not pulled — run: ollama pull {_model}"
             };
-
-            var sb = new StringBuilder();
-            // WithCancellation lets the timeout abort the token stream mid-generation
-            await foreach (var token in executor.InferAsync(prompt, inferParams)
-                               .WithCancellation(cts.Token))
-                sb.Append(token);
-
-            var result = sb.ToString().Trim();
-            ArchLogger.LogInfo($"[LLM] Inference done, output len={result.Length}");
-            return result;
-        }
-        catch (OperationCanceledException)
-        {
-            ArchLogger.LogWarn($"[LLM] Inference timed out after {timeoutSeconds}s");
-            return null;
         }
         catch (Exception ex)
         {
-            ArchLogger.LogWarn($"[LLM] Inference error:\n{ex}");
-            return null;
+            return new LLMHealthResult
+            {
+                Available = false, Model = _model, Runtime = "ollama",
+                Error = $"Ollama not running: {ex.Message}"
+            };
         }
     }
 
     // -----------------------------------------------------------------------
-    // Public API
+    // Non-streaming inference (for Interpret / Summarize / AskAsync)
     // -----------------------------------------------------------------------
 
-    public Task<LLMHealthResult> HealthCheck()
+    private async Task<string?> ChatOnce(
+        string systemPrompt, string userContent,
+        int maxTokens = 512, int timeoutSeconds = 90)
     {
-        var available = EnsureModel();
-        return Task.FromResult(new LLMHealthResult
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+
+        var payload = JsonSerializer.Serialize(new
         {
-            Available = available,
-            Model     = Path.GetFileName(_modelPath),
-            Runtime   = "llamasharp",
-            Error     = available ? null : $"Model not found or failed to load: {_modelPath}"
+            model    = _model,
+            messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user",   content = userContent  }
+            },
+            stream  = false,
+            options = new { num_predict = maxTokens, temperature = 0.1 }
         });
-    }
 
-    public async Task<InterpretResult> Interpret(string userPrompt)
-    {
-        var promptHash = HashString(userPrompt);
-        ArchLogger.LogInfo($"[LLM] Interpret: hash={promptHash} len={userPrompt.Length}");
+        ArchLogger.LogInfo($"[LLM] ChatOnce maxTokens={maxTokens} timeout={timeoutSeconds}s");
+        var content = new StringContent(payload, Encoding.UTF8, "application/json");
+        var resp    = await _http.PostAsync($"{_ollamaBase}/api/chat", content, cts.Token);
+        resp.EnsureSuccessStatusCode();
 
-        var sanitized = SanitizeForLLM(userPrompt);
+        var json = await resp.Content.ReadAsStringAsync(cts.Token);
+        var doc  = JsonDocument.Parse(json);
+        var text = doc.RootElement
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString()?.Trim();
 
-        if (!EnsureModel())
-            return HeuristicInterpret(userPrompt);
-
-        try
-        {
-            const string systemPrompt =
-                "You are an intent parser. Given a user request, extract:\n" +
-                "- intent: one of TESTSITE_EXPORT, TESTSITE_MONITOR, WEB_LOGIN, DATA_EXTRACT, FILE_DOWNLOAD, UNKNOWN\n" +
-                "- slots: key-value pairs like {\"url\": \"...\", \"username\": \"...\"}\n" +
-                "- confidence: 0.0 to 1.0\n" +
-                "- clarificationQuestions: array of questions if intent unclear\n\n" +
-                "Respond ONLY with valid JSON matching this schema:\n" +
-                "{\"intent\": \"string\", \"slots\": {}, \"confidence\": 0.0, \"clarificationQuestions\": []}";
-
-            var raw = await RunInference(systemPrompt, sanitized, maxTokens: 256);
-
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                var json = ExtractJson(raw);
-                if (json != null)
-                {
-                    var parsed = JsonSerializer.Deserialize<InterpretResult>(
-                        json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    if (parsed != null && !string.IsNullOrEmpty(parsed.Intent))
-                    {
-                        ArchLogger.LogInfo($"[LLM] Intent={parsed.Intent} confidence={parsed.Confidence}");
-                        return parsed;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            ArchLogger.LogWarn($"[LLM] Interpret failed, using heuristic: {ex.Message}");
-        }
-
-        return HeuristicInterpret(userPrompt);
-    }
-
-    public async Task<SummarizeResult> Summarize(string content)
-    {
-        var contentHash = HashString(content);
-        ArchLogger.LogInfo($"[LLM] Summarize: hash={contentHash} len={content.Length}");
-
-        var sanitized = SanitizeForLLM(content);
-        var truncated = sanitized.Length > 2000 ? sanitized[..2000] + "..." : sanitized;
-
-        if (!EnsureModel())
-            return HeuristicSummarize(content);
-
-        try
-        {
-            const string systemPrompt =
-                "You are a summarizer. Given content, produce:\n" +
-                "- shortSummary: 1-2 sentence summary\n" +
-                "- bulletInsights: key points as array\n" +
-                "- risks: potential issues or concerns\n" +
-                "- nextQuestions: follow-up questions\n\n" +
-                "Respond ONLY with valid JSON:\n" +
-                "{\"shortSummary\": \"...\", \"bulletInsights\": [], \"risks\": [], \"nextQuestions\": []}";
-
-            var raw = await RunInference(systemPrompt, truncated, maxTokens: 512);
-
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                var json = ExtractJson(raw);
-                if (json != null)
-                {
-                    var parsed = JsonSerializer.Deserialize<SummarizeResult>(
-                        json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    if (parsed != null && !string.IsNullOrEmpty(parsed.ShortSummary))
-                    {
-                        ArchLogger.LogInfo($"[LLM] Summary len={parsed.ShortSummary.Length}");
-                        return parsed;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            ArchLogger.LogWarn($"[LLM] Summarize failed, using heuristic: {ex.Message}");
-        }
-
-        return HeuristicSummarize(content);
+        ArchLogger.LogInfo($"[LLM] ChatOnce done, output len={text?.Length ?? 0}");
+        return text;
     }
 
     // -----------------------------------------------------------------------
-    // Phase 27: General-purpose LLM query
+    // Streaming inference — yields tokens one by one
     // -----------------------------------------------------------------------
 
-    /// <summary>
-    /// General-purpose LLM call. Used by Phase 27 components (ToolEvaluator,
-    /// LegalityChecker, SearchOrchestrator, ToolInstaller) for ad-hoc queries.
-    /// Falls back to empty string if model unavailable.
-    /// </summary>
+    public async IAsyncEnumerable<string> StreamAsync(
+        string systemPrompt, string userContent, int maxTokens = 150,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            model    = _model,
+            messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user",   content = userContent  }
+            },
+            stream  = true,
+            options = new { num_predict = maxTokens, temperature = 0.1 }
+        });
+
+        var request = new HttpRequestMessage(HttpMethod.Post, $"{_ollamaBase}/api/chat")
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json")
+        };
+
+        using var resp = await _http.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct);
+        resp.EnsureSuccessStatusCode();
+
+        using var stream = await resp.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        while (!reader.EndOfStream && !ct.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(ct);
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            JsonDocument? doc = null;
+            try { doc = JsonDocument.Parse(line); }
+            catch { continue; }
+
+            using (doc)
+            {
+                if (doc.RootElement.TryGetProperty("message", out var msg) &&
+                    msg.TryGetProperty("content", out var c))
+                {
+                    var token = c.GetString();
+                    if (!string.IsNullOrEmpty(token))
+                        yield return token;
+                }
+
+                if (doc.RootElement.TryGetProperty("done", out var done) && done.GetBoolean())
+                    yield break;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Public API — same interface as before
+    // -----------------------------------------------------------------------
+
     public async Task<string> AskAsync(
         string systemPrompt, string userContent, int maxTokens = 512)
     {
-        ArchLogger.LogInfo($"[LLM] AskAsync: sys={systemPrompt[..Math.Min(60, systemPrompt.Length)]}...");
-
-        if (!EnsureModel())
-        {
-            ArchLogger.LogWarn("[LLM] AskAsync: model not available, returning empty");
-            return string.Empty;
-        }
-
+        ArchLogger.LogInfo($"[LLM] AskAsync model={_model} maxTokens={maxTokens}");
         try
         {
-            var sanitized = SanitizeForLLM(userContent);
-            var raw       = await RunInference(systemPrompt, sanitized, maxTokens);
-            return raw ?? string.Empty;
+            return await ChatOnce(systemPrompt, userContent, maxTokens) ?? string.Empty;
+        }
+        catch (OperationCanceledException)
+        {
+            ArchLogger.LogWarn("[LLM] AskAsync timed out");
+            return string.Empty;
         }
         catch (Exception ex)
         {
@@ -304,8 +228,63 @@ public class LLMAdapter : IDisposable
         }
     }
 
+    public async Task<InterpretResult> Interpret(string userPrompt)
+    {
+        ArchLogger.LogInfo($"[LLM] Interpret len={userPrompt.Length}");
+        var sanitized = SanitizeForLLM(userPrompt);
+
+        const string sys =
+            "You are an intent parser. Extract the intent from the user request. " +
+            "Intent must be one of: TESTSITE_EXPORT, TESTSITE_MONITOR, WEB_LOGIN, DATA_EXTRACT, FILE_DOWNLOAD, UNKNOWN\n" +
+            "Respond ONLY with valid JSON: " +
+            "{\"intent\":\"string\",\"slots\":{},\"confidence\":0.0,\"clarificationQuestions\":[]}";
+
+        try
+        {
+            var raw = await ChatOnce(sys, sanitized, maxTokens: 256);
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var json   = ExtractJson(raw);
+                var parsed = json == null ? null : JsonSerializer.Deserialize<InterpretResult>(
+                    json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (parsed != null && !string.IsNullOrEmpty(parsed.Intent))
+                    return parsed;
+            }
+        }
+        catch (Exception ex) { ArchLogger.LogWarn($"[LLM] Interpret failed: {ex.Message}"); }
+
+        return HeuristicInterpret(userPrompt);
+    }
+
+    public async Task<SummarizeResult> Summarize(string content)
+    {
+        ArchLogger.LogInfo($"[LLM] Summarize len={content.Length}");
+        var sanitized = SanitizeForLLM(content);
+        var truncated = sanitized.Length > 2000 ? sanitized[..2000] + "..." : sanitized;
+
+        const string sys =
+            "You are a summarizer. Produce a JSON summary:\n" +
+            "{\"shortSummary\":\"...\",\"bulletInsights\":[],\"risks\":[],\"nextQuestions\":[]}";
+
+        try
+        {
+            var raw = await ChatOnce(sys, truncated, maxTokens: 512);
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var json   = ExtractJson(raw);
+                var parsed = json == null ? null : JsonSerializer.Deserialize<SummarizeResult>(
+                    json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (parsed != null && !string.IsNullOrEmpty(parsed.ShortSummary))
+                    return parsed;
+            }
+        }
+        catch (Exception ex) { ArchLogger.LogWarn($"[LLM] Summarize failed: {ex.Message}"); }
+
+        return HeuristicSummarize(content);
+    }
+
     // -----------------------------------------------------------------------
-    // Heuristic fallbacks (always available even without model)
+    // Heuristic fallbacks (no model needed)
     // -----------------------------------------------------------------------
 
     private static InterpretResult HeuristicInterpret(string prompt)
@@ -314,25 +293,15 @@ public class LLMAdapter : IDisposable
         var result = new InterpretResult { IsHeuristicFallback = true, Confidence = 0.6 };
 
         if (lower.Contains("testsite") && (lower.Contains("download") || lower.Contains("csv") || lower.Contains("export")))
-        {
-            result.Intent = "TESTSITE_EXPORT"; result.Confidence = 0.8;
-        }
-        else if (lower.Contains("testsite") && (lower.Contains("monitor") || lower.Contains("watch") || lower.Contains("poll")))
-        {
-            result.Intent = "TESTSITE_MONITOR"; result.Confidence = 0.8;
-        }
+            { result.Intent = "TESTSITE_EXPORT"; result.Confidence = 0.8; }
+        else if (lower.Contains("testsite") && (lower.Contains("monitor") || lower.Contains("watch")))
+            { result.Intent = "TESTSITE_MONITOR"; result.Confidence = 0.8; }
         else if (lower.Contains("login"))
-        {
-            result.Intent = "WEB_LOGIN"; result.Slots["action"] = "login";
-        }
+            { result.Intent = "WEB_LOGIN"; result.Slots["action"] = "login"; }
         else if (lower.Contains("download"))
-        {
-            result.Intent = "FILE_DOWNLOAD";
-        }
+            { result.Intent = "FILE_DOWNLOAD"; }
         else if (lower.Contains("extract") || lower.Contains("scrape") || lower.Contains("table"))
-        {
-            result.Intent = "DATA_EXTRACT";
-        }
+            { result.Intent = "DATA_EXTRACT"; }
         else
         {
             result.Intent = "UNKNOWN"; result.Confidence = 0.3;
@@ -354,8 +323,6 @@ public class LLMAdapter : IDisposable
         var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         result.BulletInsights = lines.Take(5).Select(l => l.Trim()).Where(l => l.Length > 10).ToList();
         result.NextQuestions.Add("Would you like more details?");
-
-        ArchLogger.LogInfo($"[LLM] Heuristic summary len={result.ShortSummary.Length}");
         return result;
     }
 
@@ -363,7 +330,6 @@ public class LLMAdapter : IDisposable
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// <summary>Extracts JSON object from a string that may contain markdown or extra text.</summary>
     private static string? ExtractJson(string raw)
     {
         var start = raw.IndexOf('{');
@@ -379,12 +345,5 @@ public class LLMAdapter : IDisposable
             "$1=[REDACTED]", RegexOptions.IgnoreCase);
         input = Regex.Replace(input, @"[a-zA-Z0-9+/]{40,}", "[LONG_TOKEN_REDACTED]");
         return input;
-    }
-
-    private static string HashString(string input)
-    {
-        using var sha = SHA256.Create();
-        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
-        return Convert.ToHexString(bytes)[..12];
     }
 }
