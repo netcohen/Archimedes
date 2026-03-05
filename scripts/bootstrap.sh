@@ -541,7 +541,7 @@ sudo snap refresh --hold chromium 2>/dev/null || true
 # ── Shared: kiosk launcher script (/usr/local/bin/archimedes-kiosk) ────
 sudo tee /usr/local/bin/archimedes-kiosk > /dev/null << KIOSKSH
 #!/bin/bash
-# Archimedes Kiosk Launcher
+# Archimedes Kiosk Launcher v2
 # Waits for Core → clears Chromium crash flag → opens dashboard in restart loop
 
 # Disable X11 DPMS / blanking
@@ -558,20 +558,30 @@ for i in \$(seq 1 45); do
     sleep 2
 done
 
+# Use a dedicated temp-ish profile dir — prevents session-restore dialogs on every start
+KIOSK_PROFILE="/tmp/archimedes-kiosk-profile"
+mkdir -p "\$KIOSK_PROFILE"
+
 # Restart loop — Chromium restarts automatically if it crashes or is killed
 while true; do
-    # Clear crash-recovery banner (appears after unclean shutdown)
-    PREF="\$HOME/.config/chromium/Default/Preferences"
-    if [ -f "\$PREF" ]; then
-        sed -i 's/"exited_cleanly":false/"exited_cleanly":true/g'  "\$PREF" 2>/dev/null || true
-        sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/g'     "\$PREF" 2>/dev/null || true
-    fi
+    # Clear crash-recovery banner — Snap Chromium stores prefs in a different path than regular.
+    # Check BOTH locations so the fix works regardless of how Chromium was installed.
+    for PREF in \\
+        "\$HOME/snap/chromium/current/.config/chromium/Default/Preferences" \\
+        "\$HOME/.config/chromium/Default/Preferences"; do
+        if [ -f "\$PREF" ]; then
+            sed -i 's/"exited_cleanly":false/"exited_cleanly":true/g'  "\$PREF" 2>/dev/null || true
+            sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/g'     "\$PREF" 2>/dev/null || true
+        fi
+    done
 
     /snap/bin/chromium \\
         --kiosk \\
+        --user-data-dir="\$KIOSK_PROFILE" \\
         --noerrdialogs \\
         --disable-infobars \\
         --disable-session-crashed-bubble \\
+        --disable-restore-session-state \\
         --disable-component-update \\
         --check-for-update-interval=31536000 \\
         --no-first-run \\
