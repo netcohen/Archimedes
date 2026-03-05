@@ -517,14 +517,22 @@ fi
 info "Installing kiosk packages (unclutter, dconf-cli)…"
 sudo apt-get install -y -qq unclutter dconf-cli 2>/dev/null || true
 
-# ── Install Chromium snap (correct binary on Ubuntu 24.04) ─────────────
-if ! /snap/bin/chromium --version &>/dev/null 2>&1; then
-    info "Installing Chromium snap…"
-    sudo snap install chromium 2>/dev/null || warn "Chromium snap install failed"
+# ── Install Chromium snap (only correct binary on Ubuntu 24.04) ────────
+# apt install chromium-browser is a stub — real package is the snap.
+if /snap/bin/chromium --version &>/dev/null 2>&1; then
+    ok "Chromium already installed: $(/snap/bin/chromium --version | head -1)"
+else
+    info "Installing Chromium snap (this may take 2-3 minutes)…"
+    sudo snap install chromium
+    # Hard fail if still missing — nothing else in Step 12 will work without it
+    if ! /snap/bin/chromium --version &>/dev/null 2>&1; then
+        err "Chromium snap install failed. Check: sudo snap install chromium"
+        exit 1
+    fi
+    ok "Chromium installed: $(/snap/bin/chromium --version | head -1)"
 fi
-# Freeze Chromium snap version — prevents mid-session auto-updates
+# Freeze snap version — prevents Chromium auto-updating mid-session
 sudo snap refresh --hold chromium 2>/dev/null || true
-ok "Chromium: $(/snap/bin/chromium --version 2>/dev/null | head -1 || echo 'snap installed')"
 
 # ── Shared: kiosk launcher script (/usr/local/bin/archimedes-kiosk) ────
 sudo tee /usr/local/bin/archimedes-kiosk > /dev/null << KIOSKSH
@@ -619,12 +627,19 @@ ok "Xorg: DPMS/blanking disabled at driver level"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  PATH A — Ubuntu Desktop (GDM3)
+#  Strategy: GDM auto-login → standard GNOME session → autostart kiosk
+#  (Custom X session abandoned: Chromium snap fails without GNOME env vars)
 # ══════════════════════════════════════════════════════════════════════════
 if $HAS_GDM; then
 
-    # 1. Disable Wayland + enable auto-login in GDM
-    #    Wayland disabled: avoids confirmed GDM3 46.2 autologin black-screen bug
-    sudo tee /etc/gdm3/custom.conf > /dev/null << GDMCONF
+    # 1. Clean up previous failed kiosk session attempts
+    sudo rm -f /usr/share/xsessions/archimedes-kiosk.desktop
+    sudo rm -f /var/lib/AccountsService/users/"$USER"
+
+    # 2. Disable Wayland + enable auto-login
+    #    WaylandEnable=false: avoids GDM3 46.2 autologin black-screen bug
+    #    Write the entire file (not sed) to guarantee WaylandEnable is uncommented
+    sudo bash -c "cat > /etc/gdm3/custom.conf" << GDMCONF
 [daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=$USER
@@ -639,29 +654,32 @@ WaylandEnable=false
 [debug]
 GDMCONF
     ok "GDM: auto-login=$USER, Wayland=disabled"
+    # Verify WaylandEnable was written correctly
+    grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf \
+        && ok "WaylandEnable=false confirmed in gdm3/custom.conf" \
+        || warn "WaylandEnable line not found — kiosk may show black screen"
 
-    # 2. Custom X11 session: GDM uses this instead of full GNOME Shell
-    sudo tee /usr/share/xsessions/archimedes-kiosk.desktop > /dev/null << 'XSESSION'
+    # 3. GNOME autostart: launch kiosk after GNOME session starts
+    #    More reliable than custom X session — GNOME sets all env vars for snap
+    mkdir -p "$HOME/.config/autostart"
+    cat > "$HOME/.config/autostart/archimedes-kiosk.desktop" << 'AUTOSTART'
 [Desktop Entry]
-Encoding=UTF-8
+Type=Application
 Name=Archimedes Kiosk
 Comment=Archimedes AI Agent fullscreen dashboard
 Exec=/usr/local/bin/archimedes-kiosk
-TryExec=/usr/local/bin/archimedes-kiosk
-Type=XSession
-XSESSION
-    ok "X11 session: /usr/share/xsessions/archimedes-kiosk.desktop"
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
+Hidden=false
+NoDisplay=false
+AUTOSTART
+    ok "GNOME autostart: ~/.config/autostart/archimedes-kiosk.desktop"
 
-    # 3. AccountsService: tell GDM which session to use at auto-login
-    sudo mkdir -p /var/lib/AccountsService/users
-    sudo tee /var/lib/AccountsService/users/"$USER" > /dev/null << ACCOUNTS
-[User]
-Session=archimedes-kiosk
-SystemAccount=false
-ACCOUNTS
-    ok "AccountsService: session=archimedes-kiosk for $USER"
+    # 4. Black desktop background (hides GNOME desktop during kiosk startup)
+    sudo -u "$USER" dbus-launch gsettings set org.gnome.desktop.background picture-uri '' 2>/dev/null || true
+    sudo -u "$USER" dbus-launch gsettings set org.gnome.desktop.background primary-color '#000000' 2>/dev/null || true
 
-    info "  Reboot → GDM auto-login → X11 kiosk session → Chromium dashboard"
+    info "  Reboot → GDM auto-login → GNOME → autostart kiosk → Chromium dashboard"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  PATH B — Ubuntu Server (no GDM, TTY1 + startx)
