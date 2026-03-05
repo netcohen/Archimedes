@@ -473,82 +473,61 @@ echo -e "  Self-improve: ${GRAY}$SI_STATUS${NC}"
 # =============================================================================
 
 # =============================================================================
-#  STEP 12 — Kiosk display: Chromium fullscreen on TTY1 (Phase 37)
+#  STEP 12 — Kiosk display: Chromium fullscreen (Phase 37)
+#  Auto-detects Ubuntu Desktop (GDM/GNOME) vs Ubuntu Server (TTY1/startx)
 # =============================================================================
 
-section "Step 12 — Kiosk display (Chromium kiosk on TTY1)"
+section "Step 12 — Kiosk display (Chromium fullscreen)"
 
-# Install minimal X11 + window manager + Chromium + cursor hider
-info "Installing X11 + Openbox + Chromium…"
-sudo apt-get install -y -qq xorg openbox unclutter 2>/dev/null || warn "Some kiosk packages failed — continuing"
+# ── Detect display environment ──────────────────────────────────────────
+HAS_GNOME=false
+HAS_GDM=false
+if systemctl is-active --quiet gdm 2>/dev/null || systemctl is-active --quiet gdm3 2>/dev/null \
+   || [ -f /etc/gdm3/custom.conf ] || command -v gnome-session &>/dev/null; then
+    HAS_GNOME=true
+fi
+command -v gdm3 &>/dev/null && HAS_GDM=true
 
-# Chromium: try apt then snap
+if $HAS_GNOME; then
+    info "Detected: Ubuntu Desktop (GNOME) — using GDM auto-login + GNOME autostart"
+else
+    info "Detected: Ubuntu Server / no desktop — using TTY1 + startx"
+fi
+
+# ── Install Chromium ────────────────────────────────────────────────────
 if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/null; then
+    info "Installing Chromium…"
     sudo apt-get install -y -qq chromium-browser 2>/dev/null \
     || sudo snap install chromium 2>/dev/null \
     || warn "Chromium not installed — kiosk browser unavailable"
 fi
+CHROMIUM_BIN=$(command -v chromium-browser 2>/dev/null \
+             || command -v chromium 2>/dev/null \
+             || snap run chromium --version &>/dev/null && echo "snap run chromium" \
+             || echo "")
+[ -n "$CHROMIUM_BIN" ] && ok "Browser: $CHROMIUM_BIN" || warn "Browser binary not found — kiosk may not start"
 
-CHROMIUM_BIN=$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || echo "")
-[ -n "$CHROMIUM_BIN" ] && ok "Browser: $CHROMIUM_BIN" || warn "Browser binary not found"
-
-# ── Auto-login on TTY1 ──────────────────────────────────────────────────
-sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
-sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf > /dev/null << AUTOLOGIN
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
-AUTOLOGIN
-sudo systemctl daemon-reload
-ok "Auto-login on TTY1 configured for user: $USER"
-
-# ── .bash_profile: auto-start X on TTY1 ────────────────────────────────
-BASH_PROF="$HOME/.bash_profile"
-if ! grep -q "ARCHIMEDES_KIOSK" "$BASH_PROF" 2>/dev/null; then
-    cat >> "$BASH_PROF" << 'XSTART'
-
-# ARCHIMEDES_KIOSK: auto-start X kiosk when logged in on TTY1
-if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
-    exec startx -- -nocursor 2>/tmp/archimedes-xstart.log
-fi
-XSTART
-    ok ".bash_profile updated (auto-start X on TTY1)"
-else
-    ok ".bash_profile already configured for kiosk"
-fi
-
-# ── .xinitrc: disable blanking + launch Chromium kiosk ─────────────────
-cat > "$HOME/.xinitrc" << XINITRC
+# ── Shared: kiosk launch script ─────────────────────────────────────────
+KIOSK_SCRIPT="$HOME/.local/bin/archimedes-kiosk.sh"
+mkdir -p "$HOME/.local/bin"
+cat > "$KIOSK_SCRIPT" << KIOSKSH
 #!/bin/bash
-# Archimedes kiosk — written by bootstrap.sh
+# Archimedes kiosk launcher — waits for Core then opens Chromium fullscreen
 
-# Disable all screen-saver / DPMS / blanking
-xset s off
-xset s noblank
-xset -dpms
-xset q &>/dev/null
+# Disable X11 screen blanking/DPMS (if X is running)
+xset s off 2>/dev/null || true
+xset s noblank 2>/dev/null || true
+xset -dpms 2>/dev/null || true
 
-# Hide idle cursor
-unclutter -idle 1 -root &
-
-# Minimal window manager (no taskbar, no decorations)
-openbox &
-
-# Wait up to 60 s for Core to be ready
-for i in \$(seq 1 30); do
+# Wait up to 90 s for Core to be ready
+for i in \$(seq 1 45); do
     curl -sf http://localhost:$CORE_PORT/health >/dev/null 2>&1 && break
     sleep 2
 done
 
-# Resolve chromium binary
-CHROMIUM=\$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null)
-if [ -z "\$CHROMIUM" ]; then
-    xmessage -center "Chromium not found — Archimedes Core running on http://localhost:$CORE_PORT"
-    exit 1
-fi
+CHROMIUM=\$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || echo "snap run chromium")
 
-# Launch Chromium in kiosk mode
-exec "\$CHROMIUM" \\
+exec \$CHROMIUM \\
     --kiosk \\
     --no-first-run \\
     --disable-infobars \\
@@ -559,13 +538,113 @@ exec "\$CHROMIUM" \\
     --check-for-update-interval=31536000 \\
     --window-position=0,0 \\
     http://localhost:$CORE_PORT/dashboard
-XINITRC
-chmod +x "$HOME/.xinitrc"
-ok "Kiosk configured: Chromium → http://localhost:$CORE_PORT/dashboard"
+KIOSKSH
+chmod +x "$KIOSK_SCRIPT"
+ok "Kiosk launcher: $KIOSK_SCRIPT"
 
-info ""
-info "  Kiosk starts automatically on next reboot."
-info "  To start now (if you have a display):  startx"
+# ══════════════════════════════════════════════════════════════════════════
+#  PATH A — Ubuntu Desktop (GNOME + GDM)
+# ══════════════════════════════════════════════════════════════════════════
+if $HAS_GNOME; then
+
+    # 1. GDM auto-login
+    if [ -f /etc/gdm3/custom.conf ]; then
+        sudo sed -i 's/^#\?AutomaticLoginEnable=.*/AutomaticLoginEnable=True/' /etc/gdm3/custom.conf
+        sudo sed -i "s/^#\?AutomaticLogin=.*/AutomaticLogin=$USER/"              /etc/gdm3/custom.conf
+        # Insert if not already present
+        grep -q "AutomaticLoginEnable" /etc/gdm3/custom.conf || \
+            sudo sed -i '/\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin='"$USER" /etc/gdm3/custom.conf
+        ok "GDM auto-login configured for: $USER"
+    else
+        warn "/etc/gdm3/custom.conf not found — auto-login may need manual setup"
+    fi
+
+    # 2. GNOME autostart entry → launches kiosk after login
+    AUTOSTART_DIR="$HOME/.config/autostart"
+    mkdir -p "$AUTOSTART_DIR"
+    cat > "$AUTOSTART_DIR/archimedes-kiosk.desktop" << DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Archimedes Kiosk
+Comment=Launch Archimedes dashboard in kiosk mode
+Exec=$KIOSK_SCRIPT
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+DESKTOP
+    ok "GNOME autostart configured: $AUTOSTART_DIR/archimedes-kiosk.desktop"
+
+    # 3. Disable GNOME screen lock / idle suspend / notifications
+    #    (gsettings only works inside an active user session — use dbus-launch)
+    if command -v gsettings &>/dev/null; then
+        # Screen lock
+        gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+        gsettings set org.gnome.desktop.screensaver idle-activation-enabled false 2>/dev/null || true
+        # Session idle (AC)
+        gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 0 2>/dev/null || true
+        gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 0 2>/dev/null || true
+        gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null || true
+        # Notifications off
+        gsettings set org.gnome.desktop.notifications show-banners false 2>/dev/null || true
+        ok "GNOME: screen lock + idle suspend disabled"
+    else
+        warn "gsettings not found — GNOME idle settings not changed"
+    fi
+
+    info "  On next reboot: GDM will auto-login → Chromium opens Archimedes dashboard"
+    info "  To test now (without reboot): bash $KIOSK_SCRIPT &"
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PATH B — Ubuntu Server (no desktop, TTY1 + startx)
+# ══════════════════════════════════════════════════════════════════════════
+else
+
+    # Install minimal X11 + window manager
+    info "Installing X11 + Openbox + unclutter…"
+    sudo apt-get install -y -qq xorg openbox unclutter 2>/dev/null || warn "Some X11 packages failed"
+
+    # Auto-login on TTY1 via getty override
+    sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+    sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf > /dev/null << AUTOLOGIN
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
+AUTOLOGIN
+    sudo systemctl daemon-reload
+    ok "Auto-login on TTY1 configured for: $USER"
+
+    # .bash_profile → exec startx on TTY1
+    BASH_PROF="$HOME/.bash_profile"
+    if ! grep -q "ARCHIMEDES_KIOSK" "$BASH_PROF" 2>/dev/null; then
+        cat >> "$BASH_PROF" << 'XSTART'
+
+# ARCHIMEDES_KIOSK: auto-start X kiosk on TTY1
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    exec startx -- -nocursor 2>/tmp/archimedes-xstart.log
+fi
+XSTART
+        ok ".bash_profile: auto-start X on TTY1"
+    else
+        ok ".bash_profile already configured"
+    fi
+
+    # .xinitrc → openbox + kiosk launcher
+    cat > "$HOME/.xinitrc" << XINITRC
+#!/bin/bash
+# Archimedes kiosk (TTY1 / startx mode)
+xset s off; xset s noblank; xset -dpms
+unclutter -idle 1 -root &
+openbox &
+exec $KIOSK_SCRIPT
+XINITRC
+    chmod +x "$HOME/.xinitrc"
+    ok "Kiosk: TTY1 → startx → openbox → Chromium"
+
+    info "  Kiosk starts automatically on next reboot."
+    info "  To start now:  startx"
+
+fi
 
 echo ""
 echo -e "${BOLD}${GREEN}"
