@@ -2497,6 +2497,60 @@ app.MapGet("/dashboard", () =>
     return Results.Content(html, "text/html; charset=utf-8");
 });
 
+// POST /admin/pull-update — git pull from main + rebuild if C# changed + restart
+app.MapPost("/admin/pull-update", async () =>
+{
+    static async Task<(string output, int exitCode)> RunCmd(string cmd)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", cmd })
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false
+        };
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        var sb = new System.Text.StringBuilder();
+        proc.OutputDataReceived += (_, e) => { if (e.Data != null) sb.AppendLine(e.Data); };
+        proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) sb.AppendLine(e.Data); };
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await proc.WaitForExitAsync(cts.Token);
+        return (sb.ToString().Trim(), proc.ExitCode);
+    }
+
+    // 1. git pull
+    var (pullOut, pullCode) = await RunCmd($"git -C \"{repoRoot}\" pull origin main 2>&1");
+    if (pullCode != 0)
+        return Results.Json(new { ok = false, message = $"git pull נכשל: {pullOut}" });
+
+    bool alreadyUpToDate = pullOut.Contains("Already up to date") || pullOut.Contains("up-to-date");
+    bool csChanged       = pullOut.Contains(".cs") || pullOut.Contains("Program") || pullOut.Contains("Core");
+
+    if (alreadyUpToDate)
+        return Results.Json(new { ok = true, message = "כבר מעודכן — אין שינויים חדשים", rebuilt = false, restarting = false });
+
+    if (csChanged)
+    {
+        // Rebuild + restart in background (must return before restart kills us)
+        _ = Task.Run(async () =>
+        {
+            var dotnet = File.Exists("/home/arcimedes/.dotnet/dotnet")
+                ? "/home/arcimedes/.dotnet/dotnet"
+                : "dotnet";
+            await RunCmd($"{dotnet} publish \"{repoRoot}/core/Archimedes.Core.csproj\" -c Release -o \"{repoRoot}/core/bin/Release/net8.0\" --nologo 2>&1");
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            await RunCmd("sudo systemctl restart archimedes");
+        });
+        return Results.Json(new { ok = true, message = $"קוד C# השתנה — בונה מחדש ומאתחל ({pullOut.Split('\n')[0]})", rebuilt = true, restarting = true });
+    }
+    else
+    {
+        // Only web/scripts changed — dashboard.html is read fresh per request, no restart needed
+        return Results.Json(new { ok = true, message = $"עדכון הושלם — {pullOut.Split('\n')[0]}", rebuilt = false, restarting = false });
+    }
+});
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");

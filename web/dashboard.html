@@ -65,7 +65,26 @@
         #header-status { color: var(--accent); font-size: 11px; }
         #uptime, #llm-badge { color: var(--muted); font-size: 11px; }
         .sep { color: var(--border); }
-        #clock { margin-left: auto; color: var(--muted); font-size: 12px; }
+        #clock { color: var(--muted); font-size: 12px; }
+
+        /* ── Update button ── */
+        #update-btn {
+            margin-left: auto;
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            font-family: 'Courier New', 'Lucida Console', monospace;
+            font-size: 11px;
+            padding: 3px 9px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: color .2s, border-color .2s;
+            flex-shrink: 0;
+        }
+        #update-btn:hover { color: var(--accent); border-color: var(--accent); }
+        #update-btn.busy  { color: var(--warn);   border-color: var(--warn); cursor: default; }
+        #update-btn.ok    { color: var(--green);  border-color: var(--green); }
+        #update-btn.err   { color: var(--danger); border-color: var(--danger); }
 
         /* ── Grid ── */
         #main {
@@ -240,6 +259,7 @@
     <span class="sep">|</span>
     <span id="llm-badge">LLM: —</span>
     <span id="clock"></span>
+    <button id="update-btn" title="משוך עדכונים מ-GitHub ועדכן">⟳ update</button>
 </div>
 
 <!-- Main grid -->
@@ -588,6 +608,53 @@ setTimeout(() => {
     chatLine('מוכן. דוגמאות: "תייצא את ynet.co.il" | "מטרה: נטר site.com כל שעה"', 'dim');
     if (chatIn) chatIn.focus();
 }, 1500);
+
+// ── Update button ───────────────────────────────────────────────────────
+const updateBtn = g('update-btn');
+let updateBusy  = false;
+
+updateBtn.addEventListener('click', async () => {
+    if (updateBusy) return;
+    updateBusy = true;
+    updateBtn.className = 'busy';
+    updateBtn.textContent = '⟳ מושך…';
+
+    try {
+        const r = await fetch('/admin/pull-update', {
+            method: 'POST',
+            signal: AbortSignal.timeout(90000)
+        });
+        const d = await r.json();
+        log('[update] ' + (d.message || JSON.stringify(d)), d.ok ? 'ok' : 'err');
+
+        if (d.restarting) {
+            // Service is restarting — wait then reload page
+            updateBtn.textContent = '⟳ בונה…';
+            setTimeout(() => {
+                updateBtn.textContent = '⟳ טוען…';
+                // Poll until Core comes back, then reload
+                const waitReload = setInterval(async () => {
+                    const h = await api('/health').catch(() => null);
+                    if (h !== null) { clearInterval(waitReload); location.reload(); }
+                }, 3000);
+            }, 15000);
+        } else {
+            updateBtn.className = d.ok ? 'ok' : 'err';
+            updateBtn.textContent = d.ok ? '✓ עדכון' : '✗ שגיאה';
+            if (d.ok && !d.restarting) {
+                // HTML-only update — just reload the page
+                setTimeout(() => location.reload(), 800);
+            } else {
+                setTimeout(() => { updateBtn.className = ''; updateBtn.textContent = '⟳ update'; updateBusy = false; }, 3000);
+            }
+        }
+    } catch (e) {
+        log('[update] שגיאה: ' + e.message, 'err');
+        updateBtn.className = 'err';
+        updateBtn.textContent = '✗ שגיאה';
+        setTimeout(() => { updateBtn.className = ''; updateBtn.textContent = '⟳ update'; updateBusy = false; }, 3000);
+    }
+});
 </script>
 </body>
 </html>
