@@ -101,6 +101,12 @@ var selfImprovementEngine = new SelfImprovementEngine(
     procedureStore, toolStore, traceService, llmAdapter, selfGitManager);
 selfImprovementEngine.Start();
 
+// Phase 30: Ubuntu OS Autonomy Engine
+var hardwareMonitor = new HardwareMonitor();
+var aptManager      = new AptManager();
+var osManager       = new OsManager(hardwareMonitor, aptManager, storageManager);
+osManager.Start();
+
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
 
@@ -872,7 +878,12 @@ app.MapGet("/status/current", () =>
             endpoint    = (string?)null,
             step        = (string?)null,
             description = (string?)null,
-            selfDev     = selfDevDesc
+            selfDev     = selfDevDesc,
+            osHealth    = new {
+                isLinux        = OperatingSystem.IsLinux(),
+                rebootRequired = OsManager.IsRebootRequired(),
+                state          = osManager.GetStatus().State.ToString()
+            }
         });
     }
 
@@ -891,7 +902,12 @@ app.MapGet("/status/current", () =>
         endpoint,
         step        = stepName,
         description,
-        selfDev     = selfDevDesc
+        selfDev     = selfDevDesc,
+        osHealth    = new {
+            isLinux        = OperatingSystem.IsLinux(),
+            rebootRequired = OsManager.IsRebootRequired(),
+            state          = osManager.GetStatus().State.ToString()
+        }
     });
 });
 
@@ -2258,6 +2274,110 @@ app.MapPost("/selfimprove/resume", () =>
     return Results.Json(new { ok = true, status = "resumed" });
 });
 
+// ── Phase 30: OS Management endpoints ─────────────────────────────────────
+
+// GET /os/status — full OS health snapshot
+app.MapGet("/os/status", () => Results.Json(osManager.GetStatus()));
+
+// GET /os/hardware — hardware metrics only (CPU temp, RAM, disks)
+app.MapGet("/os/hardware", () => Results.Json(hardwareMonitor.Collect()));
+
+// GET /os/reboot/required — is a reboot needed?
+app.MapGet("/os/reboot/required", () =>
+    Results.Json(new { required = OsManager.IsRebootRequired() }));
+
+// GET /os/reboot/scheduled — current scheduled reboot (or null)
+app.MapGet("/os/reboot/scheduled", () =>
+    Results.Json(osManager.GetScheduledReboot() ?? (object)new { scheduled = false }));
+
+// POST /os/reboot/schedule — schedule a reboot in the next maintenance window
+app.MapPost("/os/reboot/schedule", async (HttpRequest req) =>
+{
+    string? reason = null;
+    try { var body = await req.ReadFromJsonAsync<Dictionary<string, string>>(); reason = body?.GetValueOrDefault("reason"); } catch { }
+    var sched = osManager.ScheduleReboot(reason ?? "user requested");
+    return Results.Json(new { ok = true, scheduledAt = sched.ScheduledAt, reason = sched.Reason });
+});
+
+// DELETE /os/reboot/schedule — cancel scheduled reboot
+app.MapDelete("/os/reboot/schedule", () =>
+{
+    osManager.CancelScheduledReboot();
+    return Results.Json(new { ok = true, cancelled = true });
+});
+
+// POST /os/reboot/now — reboot immediately (Linux only)
+app.MapPost("/os/reboot/now", async () =>
+{
+    var (success, output) = await osManager.RebootNowAsync();
+    return Results.Json(new { ok = success, output });
+});
+
+// GET /os/maintenance-window — current maintenance window config
+app.MapGet("/os/maintenance-window", () =>
+    Results.Json(osManager.GetMaintenanceWindow()));
+
+// POST /os/maintenance-window — update maintenance window
+app.MapPost("/os/maintenance-window", async (HttpRequest req) =>
+{
+    try
+    {
+        var w = await req.ReadFromJsonAsync<MaintenanceWindow>();
+        if (w == null) return Results.BadRequest("Invalid window config");
+        osManager.SetMaintenanceWindow(w);
+        return Results.Json(new { ok = true, window = w });
+    }
+    catch (Exception ex) { return Results.BadRequest(ex.Message); }
+});
+
+// GET /os/firewall/rules — ufw status + rules
+app.MapGet("/os/firewall/rules", () =>
+    Results.Json(osManager.GetFirewallStatus()));
+
+// POST /os/firewall/rule — add a ufw rule
+app.MapPost("/os/firewall/rule", async (HttpRequest req) =>
+{
+    try
+    {
+        var rule = await req.ReadFromJsonAsync<FirewallRule>();
+        if (rule == null || string.IsNullOrWhiteSpace(rule.Port))
+            return Results.BadRequest("port is required");
+        var (success, output) = osManager.AddFirewallRule(rule);
+        return Results.Json(new { ok = success, output });
+    }
+    catch (Exception ex) { return Results.BadRequest(ex.Message); }
+});
+
+// POST /os/apt/update — run apt-get update
+app.MapPost("/os/apt/update", async () =>
+{
+    var result = await aptManager.UpdateAsync();
+    return Results.Json(result);
+});
+
+// POST /os/apt/upgrade — run apt-get upgrade
+app.MapPost("/os/apt/upgrade", async () =>
+{
+    var result = await aptManager.UpgradeAsync();
+    return Results.Json(result);
+});
+
+// POST /os/apt/autoremove — run apt-get autoremove + autoclean
+app.MapPost("/os/apt/autoremove", async () =>
+{
+    var result = await aptManager.AutoremoveAsync();
+    return Results.Json(result);
+});
+
+// POST /os/logs/cleanup — delete log files older than N days (default 30)
+app.MapPost("/os/logs/cleanup", async (HttpRequest req) =>
+{
+    int keepDays = 30;
+    try { var body = await req.ReadFromJsonAsync<Dictionary<string, int>>(); keepDays = body?.GetValueOrDefault("keepDays", 30) ?? 30; } catch { }
+    var result = osManager.CleanLogs(keepDays);
+    return Results.Json(result);
+});
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");
@@ -2266,6 +2386,7 @@ app.Lifetime.ApplicationStopping.Register(() =>
     llmAdapter.Dispose();
     goalRunner.Stop();
     selfImprovementEngine.Stop();
+    osManager.Stop();
 });
 app.Run();
 

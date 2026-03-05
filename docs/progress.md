@@ -1950,25 +1950,41 @@ SELF_TEST, ANALYZE_RESOURCES, ANALYZE_TOOL_USAGE, EXPERIMENT_PROMPT, PATCH_CORE_
 
 ---
 
-### Phase 30 - Autonomous Improvement Loop
+### Phase 30 - Ubuntu OS Autonomy ✅
 
-**What:** Archimedes מנתח את עצמו ברקע ומשפר את ביצועיו ללא התערבות משתמש.
+**What:** ארכימדס שולט מלא במערכת ההפעלה (אובונטו) — עדכונים, reboot, חומרה, firewall, logs.
 
-**תלויות — לא לבנות לפני שכל אלה קיימים:**
-- Phase 24 (Failure Dialogue) — מספק את השפה לתקשר כישלונות
-- Phase 27 (Integrations) — מייצר data אמיתי ומגוון לניתוח
-- Phase 29 (Self-Dev) — מאפשר לשיפורים לשנות קוד בפועל
+**מה נבנה:**
+- `OsManager` — background engine עם heartbeat כל שעה; מפעיל את כל ניהול ה-OS
+- `HardwareMonitor` — קורא טמפרטורת CPU מ-`/sys/class/thermal`, RAM מ-`/proc/meminfo`, דיסקים
+- `AptManager` — `apt-get update/upgrade/autoremove` עם dry-run חכם על Windows
+- `MaintenanceWindow` — חלון תחזוקה מוגדר (ברירת מחדל 03:00–04:00, ימים א'–ו')
+- עדכוני apt רצים רק בחלון התחזוקה; בדיקת metadata כל 6 שעות
+- `ScheduleReboot` — מתזמן reboot לחלון הבא; מבצע `sudo reboot` בזמן הנכון
+- `AddFirewallRule` / `GetFirewallStatus` — ניהול ufw
+- `CleanLogs` — מוחק log files ישנים מ-dataRoot ו-`/var/log/archimedes`
+- `scripts/archimedes.service` — systemd unit עם `Restart=always`, `StartLimitBurst=5`
+- `scripts/install-service.sh` — מתקין service, יוצר משתמש מערכת, מגדיר sudoers לapt+ufw+reboot
+- `/os/*` API: 14 endpoints (status, hardware, reboot/schedule, maintenance-window, firewall, apt, logs)
+- `/status/current` מורחב עם שדה `osHealth` (isLinux, rebootRequired, state)
+- כל פעולות shell — graceful fallback + dry-run מלא על Windows
+
+**Gate:** 106/106 PASS
+
+---
+
+### Phase 31 - Firebase Bidirectional + Android App
+
+**What:** תקשורת אמיתית בין ארכימדס לטלפון — FCM push, Firestore relay, אפליקציית Android מלאה.
+
+**תלויות:** Phase 30 (OS autonomy)
 
 **מה ייבנה:**
-- Background loop ב-SmartScheduler — רץ כל N דקות בלי להפריע
-- ניתוח patterns: מזהה כישלונות חוזרים לפי intent / step / selector
-- כיול keyword scoring ב-ProcedureStore לפי outcomes מצטברים
-- סימון procedures ישנות כ-stale לפי failure-rate גולש
-- תוצאות מדווחות לשורת הסטטוס בצ'אט ב-real time
-- הצעות אוטומטיות לדיאלוג כישלון (Phase 24) כשמזוהה pattern
-
-**למה Phase 30 ולא מוקדם יותר:**
-בלי Failure Dialogue הלופ לא יודע *מה* לתקן.
-בלי Integrations אין מספיק data כדי שהניתוח יהיה משמעותי.
-בלי Self-Dev השיפור נעצר בהמלצות — לא ביישום.
-מבנה לפני תצוגה.
+- Firebase FCM אמיתי ב-Net (כרגע placeholder)
+- Core מאזין לFirestore לפקודות נכנסות מהאנדרואיד
+- Android app מלאה (Kotlin + Jetpack Compose):
+  - שליחת פקודות ויצירת משימות
+  - Push notifications לאישורים, כישלונות, השלמות
+  - מסך Approval מלא (Captcha, Secret, אישור)
+  - Status ארכימדס בזמן אמת
+  - ניהול מטרות + self-improvement status

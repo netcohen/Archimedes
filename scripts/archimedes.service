@@ -1,0 +1,34 @@
+[Unit]
+Description=Archimedes AI Agent
+Documentation=https://github.com/netcohen/Archimedes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=archimedes
+Group=archimedes
+WorkingDirectory=/opt/archimedes/core
+ExecStart=/usr/bin/dotnet /opt/archimedes/core/Archimedes.Core.dll
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=archimedes
+
+# Environment
+Environment=ASPNETCORE_URLS=http://localhost:5051
+Environment=DOTNET_ENVIRONMENT=Production
+# Optional overrides (create this file with KEY=VALUE lines):
+EnvironmentFile=-/etc/archimedes/environment
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/archimedes /var/log/archimedes /tmp
+
+[Install]
+WantedBy=multi-user.target
