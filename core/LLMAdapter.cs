@@ -78,7 +78,7 @@ public class LLMAdapter : IDisposable
                 ArchLogger.LogInfo($"[LLM] Loading model: {Path.GetFileName(_modelPath)}");
                 _modelParams = new ModelParams(_modelPath)
                 {
-                    ContextSize = 2048,
+                    ContextSize   = 4096,   // 8B needs more context than 3B's 2048
                     GpuLayerCount = _gpuLayers
                 };
                 _weights = LLamaWeights.LoadFromFile(_modelParams);
@@ -103,16 +103,18 @@ public class LLMAdapter : IDisposable
     // Inference
     // -----------------------------------------------------------------------
 
-    private async Task<string?> RunInference(string systemPrompt, string userContent, int maxTokens = 512)
+    private async Task<string?> RunInference(
+        string systemPrompt, string userContent, int maxTokens = 512, int timeoutSeconds = 90)
     {
         if (_weights == null || _modelParams == null) return null;
 
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         try
         {
-            ArchLogger.LogInfo($"[LLM] Starting inference maxTokens={maxTokens}");
+            ArchLogger.LogInfo($"[LLM] Starting inference maxTokens={maxTokens} timeout={timeoutSeconds}s");
             var executor = new StatelessExecutor(_weights, _modelParams);
 
-            // Llama 3.2 Instruct chat format.
+            // Llama 3 Instruct chat format.
             // NOTE: do NOT include <|begin_of_text|> — LLamaSharp adds the BOS token
             // automatically; including it here causes a double-BOS that corrupts inference.
             var prompt =
@@ -139,16 +141,22 @@ public class LLMAdapter : IDisposable
             };
 
             var sb = new StringBuilder();
-            await foreach (var token in executor.InferAsync(prompt, inferParams))
+            // WithCancellation lets the timeout abort the token stream mid-generation
+            await foreach (var token in executor.InferAsync(prompt, inferParams)
+                               .WithCancellation(cts.Token))
                 sb.Append(token);
 
             var result = sb.ToString().Trim();
             ArchLogger.LogInfo($"[LLM] Inference done, output len={result.Length}");
             return result;
         }
+        catch (OperationCanceledException)
+        {
+            ArchLogger.LogWarn($"[LLM] Inference timed out after {timeoutSeconds}s");
+            return null;
+        }
         catch (Exception ex)
         {
-            // Log full stack trace so we can diagnose any future failure
             ArchLogger.LogWarn($"[LLM] Inference error:\n{ex}");
             return null;
         }

@@ -1105,7 +1105,7 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
         "COMMAND: none\n" +
         "RESPONSE: אני לא יודע את השעה המדויקת, אבל תוכל לראות אותה בפינה העליונה של המסך.";
 
-    var llmRaw = await llmAdapter.AskAsync(systemPrompt, message, 300);
+    var llmRaw = await llmAdapter.AskAsync(systemPrompt, message, maxTokens: 150);
 
     if (string.IsNullOrWhiteSpace(llmRaw))
         return Results.Json(new { reply = "המודל עדיין נטען — נסה שוב בעוד כמה שניות.", command = (string?)null, output = (string?)null });
