@@ -176,12 +176,14 @@ export PATH="$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools"
 section "Step 3 — Repository"
 
 if [ -d "$REPO_DIR/.git" ]; then
-    info "Repo already exists — pulling latest..."
-    git -C "$REPO_DIR" pull --ff-only
-    ok "Repo updated: $REPO_DIR"
+    info "Repo already exists — pulling latest from main..."
+    git -C "$REPO_DIR" fetch origin
+    git -C "$REPO_DIR" checkout main 2>/dev/null || true
+    git -C "$REPO_DIR" reset --hard origin/main
+    ok "Repo updated to origin/main: $REPO_DIR"
 else
-    info "Cloning Archimedes repo..."
-    git clone "$REPO_URL" "$REPO_DIR"
+    info "Cloning Archimedes repo (branch: main)..."
+    git clone -b main "$REPO_URL" "$REPO_DIR"
     ok "Repo cloned: $REPO_DIR"
 fi
 
