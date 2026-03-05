@@ -91,7 +91,11 @@ public class MigrationResumeEngine
         // 2. Log resumable tasks (already PAUSED in the migrated DB)
         LogResumableTasks(log);
 
-        // 3. Remove log — idempotency: only applies once
+        // 3. Phase 35: write CodePatcher hold marker for 24h on new machine
+        if (log.NewMachineBootstrap)
+            WriteCodePatcherHoldMarker();
+
+        // 4. Remove log — idempotency: only applies once
         try { File.Delete(logPath); }
         catch (Exception ex)
         {
@@ -102,7 +106,8 @@ public class MigrationResumeEngine
         ArchLogger.LogInfo(
             $"[MigrationResume] Migration {log.MigrationId} from " +
             $"'{log.SourceMachine}' applied — " +
-            $"tasks={log.ResumableTasks.Count} goals={log.ActiveGoalIds.Count}");
+            $"tasks={log.ResumableTasks.Count} goals={log.ActiveGoalIds.Count}" +
+            (log.NewMachineBootstrap ? " [CodePatcher held 24h]" : ""));
 
         return true;
     }
@@ -286,6 +291,30 @@ public class MigrationResumeEngine
         {
             ArchLogger.LogInfo(
                 $"[MigrationResume] Active goal at migration time: {gId}");
+        }
+    }
+
+    // ── Phase 35: CodePatcher hold marker ──────────────────────────────────
+
+    /// <summary>
+    /// Writes a hold marker file that tells SelfAnalyzer to suppress PATCH_CORE_CODE
+    /// work items for 24 hours after migrating to a new machine.
+    /// This gives the environment time to be verified stable before autonomous
+    /// code patching begins.  SelfAnalyzer reads and auto-expires this file.
+    /// </summary>
+    private void WriteCodePatcherHoldMarker()
+    {
+        try
+        {
+            var markerPath = Path.Combine(_dataRoot, "new_machine_codepatcher_hold_until.txt");
+            var holdUntil  = DateTime.UtcNow.AddHours(24).ToString("O"); // ISO 8601
+            File.WriteAllText(markerPath, holdUntil);
+            ArchLogger.LogInfo(
+                $"[MigrationResume] CodePatcher hold until {holdUntil} (new machine — 24h safety window)");
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn($"[MigrationResume] Could not write CodePatcher hold marker: {ex.Message}");
         }
     }
 

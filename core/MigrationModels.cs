@@ -120,6 +120,14 @@ public class MigrationContinuationLog
 
     /// <summary>Raw (unprotected) X25519 device key pair (64 bytes) — Base64-encoded.</summary>
     public string? RawDeviceKeysBase64 { get; set; }
+
+    /// <summary>
+    /// Phase 35: Always true for machine migrations.
+    /// Signals the resume engine to write a 24-hour CodePatcher hold marker on the
+    /// target machine — prevents autonomous code patching until the environment
+    /// has been verified stable on the new host.
+    /// </summary>
+    public bool NewMachineBootstrap { get; set; } = true;
 }
 
 // ── Disk check result ─────────────────────────────────────────────────────────

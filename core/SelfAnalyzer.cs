@@ -62,6 +62,14 @@ public sealed class SelfAnalyzer
     private int _promptIdx;
     private int _cycleCount;
 
+    // Phase 35: new-machine CodePatcher hold marker.
+    // Written by MigrationResumeEngine (on migration) and by bootstrap.sh (on fresh install).
+    // Contains an ISO 8601 UTC timestamp — CodePatcher is suppressed until that time passes.
+    // Auto-expires: no cleanup needed; the file is simply ignored once the timestamp is past.
+    private static readonly string _codePatcherHoldMarker = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Archimedes", "new_machine_codepatcher_hold_until.txt");
+
     public SelfAnalyzer(ProcedureStore procedures, ToolStore tools, TraceService traces)
     {
         _procedures = procedures;
@@ -96,7 +104,8 @@ public sealed class SelfAnalyzer
             items.Add(CreateAndroidAppItem());
 
         // Phase 34: real code patching — every 8 cycles (~2h at 15s/item)
-        if (_cycleCount % 8 == 0)
+        // Phase 35: suppressed for 24h after new-machine bootstrap (migration or fresh install)
+        if (_cycleCount % 8 == 0 && !IsCodePatcherOnHold())
             items.Add(CreatePatchItem());
 
         // Always return at least `count` items sorted by priority
@@ -104,6 +113,36 @@ public sealed class SelfAnalyzer
             .OrderByDescending(i => i.Priority)
             .Take(Math.Max(count, 3))
             .ToList();
+    }
+
+    // ── Phase 35: New-machine CodePatcher hold ────────────────────────────
+
+    /// <summary>
+    /// Returns true if the CodePatcher should be suppressed because the marker file
+    /// exists and its hold-until timestamp has not yet passed.
+    /// Once the 24h window expires the marker is effectively inert (no deletion needed).
+    /// </summary>
+    private static bool IsCodePatcherOnHold()
+    {
+        try
+        {
+            if (!File.Exists(_codePatcherHoldMarker)) return false;
+            var text = File.ReadAllText(_codePatcherHoldMarker).Trim();
+            if (DateTime.TryParse(text, null,
+                    System.Globalization.DateTimeStyles.RoundtripKind,
+                    out var holdUntil))
+            {
+                if (DateTime.UtcNow < holdUntil)
+                {
+                    ArchLogger.LogInfo(
+                        $"[SelfAnalyzer] CodePatcher on hold — new machine bootstrap " +
+                        $"(resumes at {holdUntil:HH:mm} UTC)");
+                    return true;
+                }
+            }
+        }
+        catch { /* file not readable — ignore, treat as no hold */ }
+        return false;
     }
 
     // ── Work generators ───────────────────────────────────────────────────

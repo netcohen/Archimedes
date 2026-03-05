@@ -289,13 +289,14 @@ public class MigrationStatePackager
     {
         var log = new MigrationContinuationLog
         {
-            MigrationId    = plan.MigrationId,
-            ResumableTasks = plan.TaskDecisions
+            MigrationId        = plan.MigrationId,
+            NewMachineBootstrap = true,   // Phase 35: always signal 24h CodePatcher hold on target
+            ResumableTasks     = plan.TaskDecisions
                 .Where(d => d.Action == TaskMigrationAction.SUSPEND)
                 .ToList(),
-            ActiveGoalIds  = _goalStore.GetActive()
-                                       .Select(g => g.GoalId)
-                                       .ToList()
+            ActiveGoalIds      = _goalStore.GetActive()
+                                           .Select(g => g.GoalId)
+                                           .ToList()
         };
 
         // Embed raw key material for cross-machine re-protection
