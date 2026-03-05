@@ -1064,7 +1064,10 @@ app.MapPost("/chat/message", async (HttpRequest req) =>
     }
 });
 
-// POST /chat/ask — free-form conversation with the LLM (no intent routing)
+// POST /chat/ask — agentic chat: LLM decides if a shell command is needed, then executes it.
+// Two-phase:
+//   Phase 1 — LLM produces structured output with optional COMMAND: line.
+//   Phase 2 — If COMMAND line found, execute via bash and include output in reply.
 app.MapPost("/chat/ask", async (HttpRequest req) =>
 {
     using var sr  = new StreamReader(req.Body);
@@ -1082,23 +1085,84 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
 
     availabilityEngine.RecordInteraction("chat");
 
-    // System prompt in English (Llama 3.2-3B is English-first — Hebrew instructions cause hallucinations).
-    // Hebrew is enforced as the mandatory response language explicitly in English.
+    // ── Phase 1: Ask LLM for a response + optional bash command ──────────
+    // Structured prompt the 3B model can reliably follow.
     const string systemPrompt =
-        "You are Archimedes, an autonomous AI agent running 24/7 on a dedicated Linux machine. " +
-        "You monitor websites, extract data, run shell commands, and continuously self-improve. " +
-        "IMPORTANT: Always respond in Hebrew (עברית), no matter what language the user writes in. " +
-        "Keep answers short, direct, and practical. " +
-        "If the user asks you to perform a system action (install software, change settings, add keyboard layout, run a command), " +
-        "confirm in Hebrew that you will do it and describe briefly what the action is. " +
-        "You are a capable, action-oriented work partner.";
+        "You are Archimedes, an autonomous AI agent on a dedicated Ubuntu 24.04 Linux machine. " +
+        "You have full sudo access and can run any shell command. " +
+        "Always reply in Hebrew (עברית). " +
+        "When the user asks you to DO something on the system, output your reply in this exact format:\n" +
+        "COMMAND: <single bash command or 'none'>\n" +
+        "RESPONSE: <your Hebrew reply>\n" +
+        "Examples:\n" +
+        "User: add Hebrew keyboard\n" +
+        "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
+        "RESPONSE: מוסיף תמיכה בעברית למקלדת — תוכל לעבור בין אנגלית לעברית עם Alt+Shift.\n" +
+        "User: install vim\n" +
+        "COMMAND: sudo apt-get install -y vim\n" +
+        "RESPONSE: מתקין vim.\n" +
+        "User: what time is it\n" +
+        "COMMAND: none\n" +
+        "RESPONSE: אני לא יודע את השעה המדויקת, אבל תוכל לראות אותה בפינה העליונה של המסך.";
 
-    var reply = await llmAdapter.AskAsync(systemPrompt, message, 400);
+    var llmRaw = await llmAdapter.AskAsync(systemPrompt, message, 300);
 
-    if (string.IsNullOrWhiteSpace(reply))
-        reply = "המודל עדיין נטען — נסה שוב בעוד כמה שניות.";
+    if (string.IsNullOrWhiteSpace(llmRaw))
+        return Results.Json(new { reply = "המודל עדיין נטען — נסה שוב בעוד כמה שניות.", command = (string?)null, output = (string?)null });
 
-    return Results.Json(new { reply });
+    // ── Parse COMMAND: / RESPONSE: from LLM output ───────────────────────
+    string? bashCommand = null;
+    string  hebrewReply = llmRaw.Trim();
+
+    var lines = llmRaw.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    foreach (var line in lines)
+    {
+        if (line.StartsWith("COMMAND:", StringComparison.OrdinalIgnoreCase))
+        {
+            var cmd = line["COMMAND:".Length..].Trim();
+            if (!string.IsNullOrEmpty(cmd) && !cmd.Equals("none", StringComparison.OrdinalIgnoreCase))
+                bashCommand = cmd;
+        }
+        else if (line.StartsWith("RESPONSE:", StringComparison.OrdinalIgnoreCase))
+        {
+            hebrewReply = line["RESPONSE:".Length..].Trim();
+        }
+    }
+
+    // ── Phase 2: Execute command if present ──────────────────────────────
+    string? cmdOutput = null;
+    if (!string.IsNullOrEmpty(bashCommand))
+    {
+        ArchLogger.LogInfo($"[Chat] Executing: {bashCommand}");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", bashCommand })
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false
+            };
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            var sb = new System.Text.StringBuilder();
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) sb.AppendLine(e.Data); };
+            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) sb.AppendLine(e.Data); };
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await proc.WaitForExitAsync(cts.Token);
+            cmdOutput = sb.ToString().Trim();
+            var exitOk = proc.ExitCode == 0;
+            if (!exitOk) hebrewReply += $"\n⚠ הפקודה הסתיימה עם שגיאה (קוד {proc.ExitCode}).";
+            ArchLogger.LogInfo($"[Chat] Command exit={proc.ExitCode} output={cmdOutput?[..Math.Min(200, cmdOutput?.Length ?? 0)]}");
+        }
+        catch (Exception ex)
+        {
+            cmdOutput = "שגיאה: " + ex.Message;
+            hebrewReply += "\n⚠ לא הצלחתי להריץ את הפקודה: " + ex.Message;
+        }
+    }
+
+    return Results.Json(new { reply = hebrewReply, command = bashCommand, output = cmdOutput });
 });
 
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────

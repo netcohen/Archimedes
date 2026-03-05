@@ -590,7 +590,15 @@ async function sendChat() {
 
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
+        // Show the command that was executed (if any)
+        if (d.command) chatLine('$ ' + d.command, 'dim');
+        // Show the reply
         chatLine(d.reply || d.error || JSON.stringify(d), 'bot');
+        // Show command output (truncated)
+        if (d.output) {
+            const out = d.output.length > 300 ? d.output.slice(0, 300) + '…' : d.output;
+            chatLine(out, 'dim');
+        }
 
     } catch (e) {
         clearInterval(thinkTimer);
