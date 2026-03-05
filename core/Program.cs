@@ -2565,10 +2565,11 @@ app.MapGet("/dashboard", () =>
     return Results.Content(html, "text/html; charset=utf-8");
 });
 
-// POST /admin/pull-update — git pull from main + rebuild if C# changed + restart
+// POST /admin/pull-update — git pull from main + run post-update.sh (handles everything)
+// post-update.sh covers: LLM model upgrade, kiosk script, C# rebuild + service restart
 app.MapPost("/admin/pull-update", async () =>
 {
-    static async Task<(string output, int exitCode)> RunCmd(string cmd)
+    static async Task<(string output, int exitCode)> RunCmd(string cmd, int timeoutSec = 60)
     {
         var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", cmd })
         {
@@ -2582,7 +2583,7 @@ app.MapPost("/admin/pull-update", async () =>
         proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) sb.AppendLine(e.Data); };
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec));
         await proc.WaitForExitAsync(cts.Token);
         return (sb.ToString().Trim(), proc.ExitCode);
     }
@@ -2593,30 +2594,39 @@ app.MapPost("/admin/pull-update", async () =>
         return Results.Json(new { ok = false, message = $"git pull נכשל: {pullOut}" });
 
     bool alreadyUpToDate = pullOut.Contains("Already up to date") || pullOut.Contains("up-to-date");
-    bool csChanged       = pullOut.Contains(".cs") || pullOut.Contains("Program") || pullOut.Contains("Core");
-
     if (alreadyUpToDate)
-        return Results.Json(new { ok = true, message = "כבר מעודכן — אין שינויים חדשים", rebuilt = false, restarting = false });
+        return Results.Json(new { ok = true, message = "כבר מעודכן — אין שינויים חדשים", updating = false });
 
-    if (csChanged)
+    // 2. Detect what changed (for user-facing message only — post-update.sh re-detects internally)
+    bool csChanged    = pullOut.Contains(".cs") || pullOut.Contains(".csproj");
+    bool modelChanged = pullOut.Contains("upgrade-llm") || pullOut.Contains("bootstrap.sh");
+    bool kioskChanged = pullOut.Contains("fix-kiosk") || pullOut.Contains("bootstrap.sh");
+    bool scriptChange = pullOut.Contains("scripts/");
+
+    var what = new List<string>();
+    if (csChanged)    what.Add("קוד C#");
+    if (modelChanged) what.Add("מודל LLM");
+    if (kioskChanged) what.Add("קיוסק");
+    if (!csChanged && !modelChanged && !kioskChanged) what.Add("קבצים");
+
+    // 3. Run post-update.sh in background — handles model download, kiosk update, C# rebuild
+    var postUpdateScript = Path.Combine(repoRoot, "scripts", "post-update.sh");
+    _ = Task.Run(async () =>
     {
-        // Rebuild + restart in background (must return before restart kills us)
-        _ = Task.Run(async () =>
-        {
-            var dotnet = File.Exists("/home/arcimedes/.dotnet/dotnet")
-                ? "/home/arcimedes/.dotnet/dotnet"
-                : "dotnet";
-            await RunCmd($"{dotnet} publish \"{repoRoot}/core/Archimedes.Core.csproj\" -c Release -o \"{repoRoot}/core/bin/Release/net8.0\" --nologo 2>&1");
-            await Task.Delay(TimeSpan.FromSeconds(2));
-            await RunCmd("sudo systemctl restart archimedes");
-        });
-        return Results.Json(new { ok = true, message = $"קוד C# השתנה — בונה מחדש ומאתחל ({pullOut.Split('\n')[0]})", rebuilt = true, restarting = true });
-    }
-    else
+        await RunCmd($"bash \"{postUpdateScript}\"", timeoutSec: 1800); // up to 30min (model download)
+    });
+
+    var whatStr = string.Join(", ", what);
+    var firstLine = pullOut.Split('\n')[0];
+    return Results.Json(new
     {
-        // Only web/scripts changed — dashboard.html is read fresh per request, no restart needed
-        return Results.Json(new { ok = true, message = $"עדכון הושלם — {pullOut.Split('\n')[0]}", rebuilt = false, restarting = false });
-    }
+        ok       = true,
+        message  = $"מעדכן {whatStr} ברקע — {firstLine}",
+        updating = true,
+        csChanged,
+        modelChanged,
+        log      = "/tmp/archimedes-post-update.log"
+    });
 });
 
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
