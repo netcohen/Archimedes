@@ -13,6 +13,12 @@ namespace Archimedes.Core;
 ///   Core source changes (.cs)        → git commit + push  (this class)
 ///   Acquired feature scripts/tools   → local only, NOT committed to git
 ///
+/// BRANCH STRATEGY (Phase 36):
+///   Commits land on local main (no branch switching — safe during live run).
+///   Push target is always origin/live, never origin/main.
+///   This keeps origin/main = human-authored only, origin/live = main + AI patches.
+///   Compare main..live on GitHub to audit every autonomous change.
+///
 /// Git operations are fire-and-forget with logging — a git failure never
 /// blocks the self-improvement engine.
 /// </summary>
@@ -90,14 +96,17 @@ public sealed class SelfGitManager
 
             ArchLogger.LogInfo($"[SelfGitManager] Committed self-patch: {description}");
 
-            // Push (non-blocking — failure is logged but not fatal)
+            // Push to origin/live (non-blocking — failure is logged but not fatal).
+            // Phase 36: AI patches always go to the 'live' branch on remote.
+            // origin/main stays human-only; origin/live = main + all AI patches.
+            // 'git push origin HEAD:live' creates the branch on first push automatically.
             _ = Task.Run(() =>
             {
-                var (pushOk, _, pushErr) = RunGit("push");
+                var (pushOk, _, pushErr) = RunGit("push origin HEAD:refs/heads/live");
                 if (!pushOk)
-                    ArchLogger.LogWarn($"[SelfGitManager] git push failed: {pushErr}");
+                    ArchLogger.LogWarn($"[SelfGitManager] git push to live failed: {pushErr}");
                 else
-                    ArchLogger.LogInfo("[SelfGitManager] Pushed self-patch to remote");
+                    ArchLogger.LogInfo("[SelfGitManager] Pushed self-patch to origin/live");
             });
 
             return true;

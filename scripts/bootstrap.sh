@@ -328,6 +328,24 @@ else
 fi
 
 # =============================================================================
+#  STEP 9.5 — Create 'live' branch on remote (Phase 36)
+# =============================================================================
+
+section "Step 9.5 — Creating 'live' branch on remote"
+
+# 'live' = where Archimedes pushes all autonomous self-patch commits.
+# 'main' = human-authored only. Compare main..live on GitHub to audit AI changes.
+if git -C "$REPO_DIR" ls-remote --heads origin live | grep -q live; then
+    ok "'live' branch already exists on remote"
+else
+    if git -C "$REPO_DIR" push origin HEAD:refs/heads/live 2>/dev/null; then
+        ok "'live' branch created on remote from current main"
+    else
+        warn "Could not create 'live' branch — will be created on first AI self-patch"
+    fi
+fi
+
+# =============================================================================
 #  STEP 10 — Install systemd service
 # =============================================================================
 
