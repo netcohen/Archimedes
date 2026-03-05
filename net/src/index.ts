@@ -11,6 +11,9 @@ import {
   createCommand, getPendingCommands, updateCommand, getCommand,
   getAllCommands, purgeOldCommands, CommandType
 } from "./commands";
+import {
+  startFirestorePoller, updateFirestoreResult, isFirestoreRelayActive
+} from "./firestorePoller";
 
 const PORT = parseInt(process.env.PORT || "5052", 10);
 const CORE_URL = "http://localhost:5051";
@@ -323,6 +326,15 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: "Command not found" }));
           return;
         }
+        // Sync result back to Firestore if this command originated from Firestore relay
+        // deviceId format: "fs:{firestoreDocId}" — set by firestorePoller.ts
+        if (cmd.deviceId.startsWith("fs:")) {
+          const firestoreDocId = cmd.deviceId.slice(3);
+          const fsStatus = (status === "DONE" || status === "FAILED")
+            ? (status as "DONE" | "FAILED")
+            : "DONE";
+          updateFirestoreResult(firestoreDocId, fsStatus, result).catch(() => {});
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ id: cmd.id, status: cmd.status }));
       } catch (e) {
@@ -393,6 +405,16 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── Phase 31: Firestore relay status ─────────────────────────────────────
+  if (req.method === "GET" && req.url === "/v1/android/firestore/status") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      relayActive: isFirestoreRelayActive(),
+      mode: isFirestoreRelayActive() ? "firestore" : "memory-only",
+    }));
+    return;
+  }
+
   // ── Phase 31: Android status proxy ───────────────────────────────────────
   if (req.method === "GET" && req.url === "/v1/android/status") {
     http.get(CORE_URL + "/status/current", (up) => {
@@ -415,6 +437,10 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Archimedes Net listening on http://localhost:${PORT}`);
+  // Start Firestore commands poller + status push (requires GOOGLE_APPLICATION_CREDENTIALS)
+  startFirestorePoller().catch((e) => {
+    console.warn('[Net] Firestore poller failed to start:', String(e).slice(0, 80));
+  });
 });
 
 export async function sendEnvelopeToCore(payload: string): Promise<void> {

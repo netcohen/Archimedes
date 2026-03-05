@@ -1,9 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    // Firebase Google Services plugin is NOT applied here.
-    // Firebase is handled server-side via the Net service (firebase-admin).
-    // To enable FCM push notifications on Android, add google-services.json and apply the plugin.
+    id("com.google.gms.google-services")   // Firebase — required for Firestore + FCM client SDK
 }
 android {
     namespace = "com.archimedes.app"
@@ -12,8 +10,8 @@ android {
         applicationId = "com.archimedes.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
     buildTypes {
         release {
@@ -40,12 +38,21 @@ dependencies {
     implementation("androidx.cardview:cardview:1.0.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // Background polling
+    // Background polling (WorkManager)
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
 
     // QR scanning (Phase 0 pairing)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // Firebase — enables remote phone access from anywhere
+    //   Firestore: Android writes commands → Net polls → Core executes → result back
+    //   FCM: push notifications (approvals, status) from Core via Net service
+    //   SECURITY: payload passes as encrypted envelope (pairing-established key)
+    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
+    implementation("com.google.firebase:firebase-firestore-ktx")
+    implementation("com.google.firebase:firebase-messaging-ktx")
 }
