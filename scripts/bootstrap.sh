@@ -130,8 +130,10 @@ IdleAction=ignore
 IdleActionSec=0
 LOGINDCONF
 
-sudo systemctl restart systemd-logind 2>/dev/null || true
-ok "System sleep/suspend permanently disabled"
+# Do NOT restart systemd-logind here — it kills the active GNOME session.
+# The logind.conf changes take effect at next reboot (or next logind restart).
+sudo systemctl daemon-reload 2>/dev/null || true
+ok "System sleep/suspend permanently disabled (takes full effect at next reboot)"
 
 # =============================================================================
 #  STEP 0.6 — sudo without password (Archimedes needs autonomous sudo access)
@@ -635,8 +637,26 @@ if $HAS_GDM; then
     # 1. Clean up previous failed kiosk session attempts
     sudo rm -f /usr/share/xsessions/archimedes-kiosk.desktop
     sudo rm -f /var/lib/AccountsService/users/"$USER"
+    ok "Cleaned up previous kiosk session artifacts"
 
-    # 2. Disable Wayland + enable auto-login
+    # 2. GNOME autostart: launch kiosk after GNOME session starts
+    #    Created BEFORE GDM config write — so even if something restarts the session,
+    #    the autostart file is already in place.
+    mkdir -p "$HOME/.config/autostart"
+    cat > "$HOME/.config/autostart/archimedes-kiosk.desktop" << 'AUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=Archimedes Kiosk
+Comment=Archimedes AI Agent fullscreen dashboard
+Exec=/usr/local/bin/archimedes-kiosk
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
+Hidden=false
+NoDisplay=false
+AUTOSTART
+    ok "GNOME autostart: ~/.config/autostart/archimedes-kiosk.desktop"
+
+    # 3. Disable Wayland + enable auto-login  (written LAST in PATH A)
     #    WaylandEnable=false: avoids GDM3 46.2 autologin black-screen bug
     #    Write the entire file (not sed) to guarantee WaylandEnable is uncommented
     sudo bash -c "cat > /etc/gdm3/custom.conf" << GDMCONF
@@ -658,22 +678,6 @@ GDMCONF
     grep -q "^WaylandEnable=false" /etc/gdm3/custom.conf \
         && ok "WaylandEnable=false confirmed in gdm3/custom.conf" \
         || warn "WaylandEnable line not found — kiosk may show black screen"
-
-    # 3. GNOME autostart: launch kiosk after GNOME session starts
-    #    More reliable than custom X session — GNOME sets all env vars for snap
-    mkdir -p "$HOME/.config/autostart"
-    cat > "$HOME/.config/autostart/archimedes-kiosk.desktop" << 'AUTOSTART'
-[Desktop Entry]
-Type=Application
-Name=Archimedes Kiosk
-Comment=Archimedes AI Agent fullscreen dashboard
-Exec=/usr/local/bin/archimedes-kiosk
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-Hidden=false
-NoDisplay=false
-AUTOSTART
-    ok "GNOME autostart: ~/.config/autostart/archimedes-kiosk.desktop"
 
     # 4. Black desktop background (hides GNOME desktop during kiosk startup)
     sudo -u "$USER" dbus-launch gsettings set org.gnome.desktop.background picture-uri '' 2>/dev/null || true
