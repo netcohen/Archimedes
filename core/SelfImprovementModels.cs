@@ -22,7 +22,8 @@ public enum SelfWorkType
     ANALYZE_TOOL_USAGE,   // Find unused / underused acquired tools
     ANALYZE_RESOURCES,    // Measure CPU / RAM patterns and efficiency
     EXPERIMENT_PROMPT,    // Try alternative prompt templates for common intents
-    PATCH_CORE_CODE       // Generate + sandbox-test + apply code improvement
+    PATCH_CORE_CODE,      // Generate + sandbox-test + apply code improvement
+    ANALYZE_ANDROID_APP   // Phase 32+: check Android app health, OTA status, FCM registration
 }
 
 /// <summary>Status of a single self-improvement work item.</summary>

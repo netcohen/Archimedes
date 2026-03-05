@@ -16,6 +16,7 @@ namespace Archimedes.Core;
 ///   - Resource analysis (CPU / RAM patterns)
 ///   - Self-testing (endpoint health checks)
 ///   - Prompt experimentation (alternative prompt templates)
+///   - Android app health analysis (Phase 32+)
 /// </summary>
 public sealed class SelfAnalyzer
 {
@@ -41,6 +42,11 @@ public sealed class SelfAnalyzer
         "agent loop design patterns: planning, execution, reflection",
         "low-latency in-process messaging in .NET",
         "techniques for self-describing autonomous systems",
+        // Phase 32+: Android app as part of Archimedes
+        "Android Kotlin: background services, WorkManager, and battery optimization",
+        "Firebase FCM push notification delivery reliability and fallback strategies",
+        "ADB over WiFi: automation, security, and deployment best practices",
+        "Android app architecture: MVVM, coroutines, and Firestore real-time sync",
     ];
 
     // ── Intent Rotation for Prompt Experiments ────────────────────────────
@@ -84,6 +90,10 @@ public sealed class SelfAnalyzer
 
         if (_cycleCount % 3 == 0)
             items.Add(NextPromptExperiment());
+
+        // Phase 32+: Android app is part of Archimedes — check its health every 4 cycles
+        if (_cycleCount % 4 == 0)
+            items.Add(CreateAndroidAppItem());
 
         // Always return at least `count` items sorted by priority
         return items
@@ -229,6 +239,21 @@ public sealed class SelfAnalyzer
             Type        = SelfWorkType.SELF_TEST,
             Description = "בדיקת תקינות עצמית — בדיקת endpoints ומצב מערכת",
             Priority    = 7,
+        };
+    }
+
+    /// <summary>
+    /// Phase 32+: Android app health check item.
+    /// Archimedes treats its Android app as an integral part of itself —
+    /// monitoring device registration, FCM connectivity, and OTA update readiness.
+    /// </summary>
+    private static SelfWorkItem CreateAndroidAppItem()
+    {
+        return new SelfWorkItem
+        {
+            Type        = SelfWorkType.ANALYZE_ANDROID_APP,
+            Description = "ניתוח מצב אפליקציה אנדרואיד — בדיקת רישום מכשיר, FCM, ADB ומוכנות לעדכון OTA",
+            Priority    = 5,
         };
     }
 

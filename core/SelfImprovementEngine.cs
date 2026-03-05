@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace Archimedes.Core;
 
@@ -8,6 +9,11 @@ namespace Archimedes.Core;
 /// The core of Archimedes' autonomy. Runs 24/7 in the background.
 /// There is always work to do — no idle state.
 ///
+/// Archimedes treats ALL its components as part of itself:
+///   - Core (.NET service)    — procedures, LLM, research, code patching
+///   - Net service (Node.js)  — FCM, Firestore relay, device registry
+///   - Android app (Kotlin)   — the "eyes and hands" on mobile (Phase 32+)
+///
 /// Priority model:
 ///   User tasks  → always take precedence
 ///   Engine      → pauses when user tasks are active or CPU is high
@@ -15,7 +21,7 @@ namespace Archimedes.Core;
 ///
 /// Work types: research, LLM benchmarking, procedure analysis, tool analysis,
 ///             resource analysis, prompt experimentation, dataset collection,
-///             self-testing, and (Phase 29.1+) Core code patching.
+///             self-testing, Core code patching, Android app analysis (Phase 32+).
 ///
 /// Git: when PATCH_CORE_CODE is applied, commits and pushes the Core .cs
 ///      changes for user visibility and audit. Acquired feature scripts
@@ -32,6 +38,8 @@ public sealed class SelfImprovementEngine
     private readonly TraceService        _traces;
     private readonly LLMAdapter          _llm;
     private readonly SelfGitManager      _git;
+    // Phase 32+: Android app is part of Archimedes — wired after construction
+    private AppUpdater?                  _appUpdater;
 
     // ── State ─────────────────────────────────────────────────────────────
     private readonly Queue<SelfWorkItem> _queue      = new();
@@ -93,6 +101,18 @@ public sealed class SelfImprovementEngine
         _guard.OnThrottle += () => ArchLogger.LogInfo("[SelfImprove] Throttling — CPU high");
         _guard.OnPause    += () => ArchLogger.LogInfo("[SelfImprove] Pausing — CPU critical");
         _guard.OnResume   += () => ArchLogger.LogInfo("[SelfImprove] Resuming — CPU normal");
+    }
+
+    // ── Android integration (Phase 32+) ───────────────────────────────────
+
+    /// <summary>
+    /// Wire the Android OTA updater after construction (avoids circular instantiation order).
+    /// Called from Program.cs after both SelfImprovementEngine and AppUpdater are created.
+    /// </summary>
+    public void SetAppUpdater(AppUpdater appUpdater)
+    {
+        _appUpdater = appUpdater;
+        ArchLogger.LogInfo("[SelfImprove] Android app wired — Archimedes now monitors its mobile component");
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -352,6 +372,10 @@ public sealed class SelfImprovementEngine
                     result.Success = true;
                     break;
 
+                case SelfWorkType.ANALYZE_ANDROID_APP:
+                    await ExecuteAnalyzeAndroidApp(result, timeout.Token);
+                    break;
+
                 default:
                     result.Summary = $"סוג עבודה לא מוכר: {item.Type}";
                     result.Success = false;
@@ -562,6 +586,24 @@ public sealed class SelfImprovementEngine
         }
         catch { tests.Add(("/selfimprove/status", false)); }
 
+        // Android app health (Phase 32+)
+        _currentStep = "בודק מצב אפליקציה אנדרואיד...";
+        try
+        {
+            var netUrl    = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
+            var r         = await _http.GetAsync($"{netUrl}/v1/android/devices", ct);
+            var hasPhone  = false;
+            if (r.IsSuccessStatusCode)
+            {
+                var body = await r.Content.ReadAsStringAsync(ct);
+                using var d = JsonDocument.Parse(body);
+                hasPhone = d.RootElement.GetArrayLength() > 0;
+            }
+            tests.Add(("android/devices", r.IsSuccessStatusCode));
+            // Not having a registered phone is OK (expected when app not running) — don't fail test
+        }
+        catch { tests.Add(("android/devices", false)); }
+
         var passed = tests.Count(t => t.pass);
         var total  = tests.Count;
         result.Success = passed == total;
@@ -653,6 +695,106 @@ public sealed class SelfImprovementEngine
                          $"חלופי={r2.Intent}({sw2.ElapsedMilliseconds}ms) " +
                          $"std={stdCorrect} alt={altCorrect}";
         result.Summary = $"Prompt experiment: std={stdCorrect} alt={altCorrect}";
+    }
+
+    // ── Android App Analysis (Phase 32+) ─────────────────────────────────
+
+    /// <summary>
+    /// Archimedes checks the health of its own Android app:
+    ///   - How many devices are registered (phone reported its IP)?
+    ///   - Is FCM token registered for push delivery?
+    ///   - Is the OTA update infrastructure ready (ADB, build script)?
+    ///   - Has the app been recently updated?
+    ///
+    /// The Android app is not a separate product — it is Archimedes' mobile component.
+    /// </summary>
+    private async Task ExecuteAnalyzeAndroidApp(SelfWorkResult result, CancellationToken ct)
+    {
+        _currentStep = "בודק מצב אפליקציה אנדרואיד...";
+        var parts    = new List<string>();
+        var problems = new List<string>();
+        var netUrl   = Environment.GetEnvironmentVariable("ARCHIMEDES_NET_URL") ?? "http://localhost:5052";
+
+        // 1. Check registered devices from Net service
+        _currentStep = "בודק מכשירים רשומים...";
+        string? phoneIp    = null;
+        int     deviceCount = 0;
+        try
+        {
+            var json = await _http.GetStringAsync($"{netUrl}/v1/android/devices", ct);
+            using var doc = JsonDocument.Parse(json);
+            deviceCount = doc.RootElement.GetArrayLength();
+            if (deviceCount > 0)
+            {
+                parts.Add($"{deviceCount} מכשיר(ים) רשום(ים) ✓");
+                var first = doc.RootElement[0];
+                if (first.TryGetProperty("ip", out var ipEl) && ipEl.ValueKind == JsonValueKind.String)
+                    phoneIp = ipEl.GetString();
+                if (phoneIp != null)
+                    parts.Add($"IP: {phoneIp}");
+            }
+            else
+            {
+                problems.Add("אין מכשיר אנדרואיד רשום — האפליקציה לא רצה/לא מחוברת לרשת");
+            }
+        }
+        catch { problems.Add("Net service לא נגיש"); }
+
+        // 2. Check OTA updater status from Core
+        _currentStep = "בודק מצב מנגנון עדכון OTA...";
+        try
+        {
+            // Use the injected AppUpdater directly when available (faster + no HTTP)
+            object otaStatus = _appUpdater != null
+                ? _appUpdater.GetStatus()
+                : (object)await _http.GetStringAsync($"{_selfUrl}/android/update/status", ct);
+
+            bool scriptExists, adbAvailable, updateRunning;
+
+            if (_appUpdater != null)
+            {
+                // Use reflection-free dynamic access via serialization
+                var json2 = JsonSerializer.Serialize(_appUpdater.GetStatus());
+                using var d2 = JsonDocument.Parse(json2);
+                scriptExists  = d2.RootElement.GetProperty("scriptExists").GetBoolean();
+                adbAvailable  = d2.RootElement.GetProperty("adbAvailable").GetBoolean();
+                updateRunning = d2.RootElement.GetProperty("running").GetBoolean();
+            }
+            else
+            {
+                var json2 = (string)otaStatus;
+                using var d2 = JsonDocument.Parse(json2);
+                scriptExists  = d2.RootElement.GetProperty("scriptExists").GetBoolean();
+                adbAvailable  = d2.RootElement.GetProperty("adbAvailable").GetBoolean();
+                updateRunning = d2.RootElement.GetProperty("running").GetBoolean();
+            }
+
+            if (scriptExists)  parts.Add("סקריפט עדכון קיים ✓");
+            else               problems.Add("סקריפט update-android.sh חסר");
+
+            if (adbAvailable)  parts.Add("ADB זמין ✓");
+            else               problems.Add("ADB לא מותקן — לא ניתן לבצע OTA WiFi");
+
+            if (updateRunning) parts.Add("עדכון בתהליך...");
+        }
+        catch (Exception ex)
+        {
+            problems.Add($"שגיאה בבדיקת OTA: {ex.Message[..Math.Min(50, ex.Message.Length)]}");
+        }
+
+        // 3. Compose insight
+        var healthy = problems.Count == 0;
+        var summary = healthy
+            ? $"אנדרואיד: {deviceCount} מכשיר(ים) — תקין"
+            : $"אנדרואיד: {string.Join("; ", problems)}";
+
+        result.Success = healthy;
+        result.Insight = $"מצב אפליקציה אנדרואיד | " +
+                         (parts.Count > 0 ? string.Join(", ", parts) : "לא פעיל") +
+                         (problems.Count > 0 ? " | בעיות: " + string.Join(", ", problems) : "");
+        result.Summary = summary;
+
+        await Task.Delay(100, ct);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

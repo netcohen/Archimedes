@@ -114,6 +114,8 @@ androidBridge.Start();
 
 // Phase 32: Android App OTA Updater (ADB WiFi)
 var appUpdater = new AppUpdater(httpClientFactory.CreateClient(), androidBridge);
+// Phase 32+: Wire Android app into self-improvement — Archimedes monitors its own mobile component
+selfImprovementEngine.SetAppUpdater(appUpdater);
 
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
