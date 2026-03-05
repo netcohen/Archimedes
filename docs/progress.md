@@ -2065,4 +2065,25 @@ Invoke-RestMethod http://localhost:5051/android/update/status
 # → { running: false, lastStatus: "done: Installation complete ✓", adbAvailable: true }
 ```
 
-**Gate:** `scripts/phase32-ota-gate.ps1`
+**Gate:** `scripts/phase32-ota-gate.ps1` — 46/46 PASS
+
+---
+
+## Phase 32b — Android כחלק ממנוע השיפור העצמי
+
+**מטרה:** ארכימדס יודע שהאפליקציה הניידת היא חלק ממנו — ומטפל בה ומשפר אותה כחלק מהלופ האוטונומי.
+
+**מה השתנה:**
+- `SelfImprovementModels.cs` — נוסף `ANALYZE_ANDROID_APP` ל-enum
+- `SelfAnalyzer.cs` — health check לאנדרואיד כל 4 מחזורים + 4 נושאי מחקר אנדרואיד
+- `SelfImprovementEngine.cs`:
+  - `SetAppUpdater()` — חיבור `AppUpdater` לאחר הבנייה
+  - `ExecuteAnalyzeAndroidApp()` — בדיקת מכשירים רשומים, ADB, סקריפט עדכון
+  - `ExecuteSelfTest()` — כולל עכשיו `android/devices` ברשימת health checks
+  - doc comment: "Android app (Kotlin) — the eyes and hands on mobile"
+- `Program.cs` — `selfImprovementEngine.SetAppUpdater(appUpdater)`
+
+**תוצאה:** כל ~4 מחזורי שיפור עצמי, ארכימדס בודק:
+```
+אנדרואיד: 1 מכשיר(ים) רשום(ים) ✓, IP: 192.168.1.x, סקריפט עדכון קיים ✓, ADB זמין ✓
+```
