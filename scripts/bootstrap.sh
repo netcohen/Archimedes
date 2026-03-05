@@ -221,16 +221,24 @@ fi
 
 section "Step 5 — Building Archimedes Core"
 
+# Use explicit .csproj path + full dotnet binary path to avoid MSB1009
+CSPROJ="$REPO_DIR/core/Archimedes.Core.csproj"
+DOTNET_BIN="$DOTNET_ROOT/dotnet"
+
+if [ ! -f "$CSPROJ" ]; then
+    err "Project file not found: $CSPROJ"
+    err "Check that the repo cloned correctly: ls $REPO_DIR/core/"
+    exit 1
+fi
+
 info "Running dotnet publish (Release)..."
-dotnet publish "$REPO_DIR/core" \
+"$DOTNET_BIN" publish "$CSPROJ" \
     -c Release \
     -o "$REPO_DIR/core/bin/Release/net8.0" \
-    --nologo \
-    -v minimal 2>&1 | grep -E "error|warning|Build|publish" || true
+    --nologo 2>&1
 
 if [ ! -f "$REPO_DIR/core/bin/Release/net8.0/Archimedes.Core.dll" ]; then
     err "Build failed — Archimedes.Core.dll not found"
-    err "Run manually: dotnet publish $REPO_DIR/core -c Release"
     exit 1
 fi
 ok "Core binary built successfully"
