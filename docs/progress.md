@@ -1,4 +1,4 @@
-# Archimedes – Development Progress
+﻿# Archimedes – Development Progress
 
 ## Phase 0 – Repo Scaffold ✅
 
@@ -2087,3 +2087,50 @@ Invoke-RestMethod http://localhost:5051/android/update/status
 ```
 אנדרואיד: 1 מכשיר(ים) רשום(ים) ✓, IP: 192.168.1.x, סקריפט עדכון קיים ✓, ADB זמין ✓
 ```
+
+---
+
+## Phase 34 - Self-Improvement: Eyes (Web Research) + Hands (Code Patching)
+
+**Status:** Complete
+
+**Problem Solved:**
+Archimedes was running 24/7 but was functionally blind and physically disabled:
+- RESEARCH_WEB called the local 3B LLM with no internet access (fabricated knowledge)
+- PATCH_CORE_CODE was a placeholder - returned success=true without doing anything
+
+**Solution:**
+Phase 34 gives Archimedes real eyes (DuckDuckGo + Tor) and real hands (LLM -> sandbox build/test -> git commit).
+
+**Files Changed:**
+
+| File | Change |
+|------|--------|
+| core/SearchOrchestrator.cs | Added ResearchTopicAsync(topic, ct) - DuckDuckGo HTML + Tor proxy |
+| core/SelfImprovementEngine.cs | Wired new deps, replaced both placeholder implementations |
+| core/SelfAnalyzer.cs | Added CreatePatchItem() + PATCH_CORE_CODE every 8 cycles |
+| core/Program.cs | Fixed repoRoot ordering bug, passed new deps to engine |
+| core/CodePatcher.cs | NEW - full autonomous code-patch lifecycle |
+| scripts/phase34-ready-gate.ps1 | NEW - 30-assertion gate |
+
+**Eyes - ResearchTopicAsync:**
+- Calls DuckDuckGo HTML (html.duckduckgo.com/html/) to fetch real search results
+- Uses Tor SOCKS5 proxy (port 9050) automatically if available
+- Returns up to 5 result snippets for LLM synthesis
+- Labels insight: "(web: N sources)" or "(internal knowledge)" on fallback
+
+**Hands - CodePatcher.TryPatchAsync:**
+- Selects safe target (rotating): HeuristicInterpret / AnalyzeFailure / ResearchTopics
+- Extracts method/array via balanced-brace walk (max 120 lines - skip if larger)
+- LLM improves the extracted block with goal-specific prompt
+- Sanity checks: braces present, not identical, length > 20
+- Applies patch, runs dotnet build (90s) + dotnet test (120s)
+- Reverts file to original on ANY failure
+- Commits via SelfGitManager.CommitCoreChange() only on full success
+
+**Safe Targets (v1 - additive only, never business logic):**
+- core/LLMAdapter.cs -> HeuristicInterpret (add intent keywords)
+- core/FailureAnalyzer.cs -> AnalyzeFailure (add failure pattern categories)
+- core/SelfAnalyzer.cs -> ResearchTopics array (expand with new topics)
+
+**Gate:** scripts/phase34-ready-gate.ps1 - 30/30 PASS (0 FAIL, 0 WARN)

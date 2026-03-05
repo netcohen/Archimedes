@@ -38,6 +38,9 @@ public sealed class SelfImprovementEngine
     private readonly TraceService        _traces;
     private readonly LLMAdapter          _llm;
     private readonly SelfGitManager      _git;
+    // Phase 34: Eyes (web research) + Hands (code patching)
+    private readonly SearchOrchestrator  _searchOrchestrator;
+    private readonly CodePatcher         _codePatcher;
     // Phase 32+: Android app is part of Archimedes — wired after construction
     private AppUpdater?                  _appUpdater;
 
@@ -87,16 +90,20 @@ public sealed class SelfImprovementEngine
         ToolStore            tools,
         TraceService         traces,
         LLMAdapter           llm,
-        SelfGitManager       git)
+        SelfGitManager       git,
+        SearchOrchestrator   searchOrchestrator,   // Phase 34: real web research
+        CodePatcher          codePatcher)           // Phase 34: real code patching
     {
-        _analyzer   = analyzer;
-        _store      = store;
-        _guard      = guard;
-        _procedures = procedures;
-        _tools      = tools;
-        _traces     = traces;
-        _llm        = llm;
-        _git        = git;
+        _analyzer           = analyzer;
+        _store              = store;
+        _guard              = guard;
+        _procedures         = procedures;
+        _tools              = tools;
+        _traces             = traces;
+        _llm                = llm;
+        _git                = git;
+        _searchOrchestrator = searchOrchestrator;
+        _codePatcher        = codePatcher;
 
         _guard.OnThrottle += () => ArchLogger.LogInfo("[SelfImprove] Throttling — CPU high");
         _guard.OnPause    += () => ArchLogger.LogInfo("[SelfImprove] Pausing — CPU critical");
@@ -367,9 +374,8 @@ public sealed class SelfImprovementEngine
                     break;
 
                 case SelfWorkType.PATCH_CORE_CODE:
-                    // Phase 29.1: placeholder — logs intent only
-                    result.Summary = "PATCH_CORE_CODE — מחכה ל-Phase 29.1 (code generation)";
-                    result.Success = true;
+                    // Phase 34: real code patching (LLM → sandbox build/test → git commit)
+                    await ExecutePatchCoreCode(result, timeout.Token);
                     break;
 
                 case SelfWorkType.ANALYZE_ANDROID_APP:
@@ -502,19 +508,49 @@ public sealed class SelfImprovementEngine
         SelfWorkItem item, SelfWorkResult result, CancellationToken ct)
     {
         var topic = item.Context.TryGetValue("topic", out var t) ? t : item.Description;
-        _currentStep = $"חוקר: {topic[..Math.Min(40, topic.Length)]}...";
+        _currentStep = $"גולש ברשת: {topic[..Math.Min(40, topic.Length)]}...";
+
+        // Phase 34: real web search via SearchOrchestrator (DuckDuckGo + Tor if available)
+        List<string> snippets = [];
+        try
+        {
+            snippets = await _searchOrchestrator.ResearchTopicAsync(topic, ct);
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn($"[SelfImprove] Web search failed, using internal knowledge: {ex.Message}");
+        }
+
+        // Build LLM prompt — enriched with web snippets when available
+        _currentStep = "מסכם ממצאים עם LLM...";
+        string prompt;
+        if (snippets.Count > 0)
+        {
+            var webContent = string.Join("\n---\n", snippets);
+            prompt = $"Research topic: {topic}\n\n" +
+                     $"Web search results:\n{webContent}\n\n" +
+                     "Based on the above web results, synthesize the most actionable insights in 3-4 sentences.";
+        }
+        else
+        {
+            prompt = $"Research topic: {topic}\n\n" +
+                     "Summarize the most important practical insights in 3-4 sentences.";
+        }
 
         var response = await _llm.AskAsync(
             "You are a technical research assistant for an autonomous AI agent system. " +
             "Provide a concise, actionable summary with key insights the agent can apply.",
-            $"Research topic: {topic}\n\nSummarize the most important practical insights in 3-4 sentences.",
-            384);
+            prompt, 384);
+
+        var webFlag = snippets.Count > 0
+            ? $"(web: {snippets.Count} sources{(_searchOrchestrator.IsTorAvailable ? " via Tor" : "")})"
+            : "(internal knowledge)";
 
         if (!string.IsNullOrWhiteSpace(response))
         {
             result.Success = true;
-            result.Insight = $"מחקר '{topic[..Math.Min(50, topic.Length)]}': {response}";
-            result.Summary = $"מחקר הושלם: {response[..Math.Min(80, response.Length)]}...";
+            result.Insight = $"מחקר '{topic[..Math.Min(50, topic.Length)]}' {webFlag}: {response}";
+            result.Summary = $"מחקר הושלם {webFlag}";
         }
         else
         {
@@ -695,6 +731,31 @@ public sealed class SelfImprovementEngine
                          $"חלופי={r2.Intent}({sw2.ElapsedMilliseconds}ms) " +
                          $"std={stdCorrect} alt={altCorrect}";
         result.Summary = $"Prompt experiment: std={stdCorrect} alt={altCorrect}";
+    }
+
+    // ── Code Patching (Phase 34) ──────────────────────────────────────────
+
+    private async Task ExecutePatchCoreCode(SelfWorkResult result, CancellationToken ct)
+    {
+        _currentStep = "בוחר יעד לשיפור קוד...";
+        var insight  = _store.GetLatestInsight();
+
+        _currentStep = "מייצר שיפור קוד עם LLM...";
+        var patchResult = await _codePatcher.TryPatchAsync(insight, ct);
+
+        result.Success = patchResult.Success;
+        result.Summary = patchResult.Summary;
+
+        if (patchResult.Success)
+        {
+            result.Insight = $"קוד שופר: {patchResult.TargetMethod} ב-{patchResult.TargetFile} — " +
+                             "build+tests עברו, commit נוצר";
+            ArchLogger.LogInfo($"[SelfImprove] Code patch committed: {patchResult.TargetMethod}");
+        }
+        else
+        {
+            ArchLogger.LogInfo($"[SelfImprove] Code patch skipped/reverted: {patchResult.Summary}");
+        }
     }
 
     // ── Android App Analysis (Phase 32+) ─────────────────────────────────

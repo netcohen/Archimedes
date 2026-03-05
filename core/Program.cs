@@ -91,14 +91,28 @@ var storageManager = new StorageManager(storageConfig);
 // Phase 19: Observability
 var traceService = new TraceService();
 
+// Repo root detection (used by Phase 29/34 CodePatcher and Phase 15/16 SandboxRunner)
+var repoRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_REPO_ROOT");
+if (string.IsNullOrEmpty(repoRoot))
+{
+    var d = new DirectoryInfo(AppContext.BaseDirectory);
+    while (d != null && !File.Exists(Path.Combine(d.FullName, "scripts", "phase14-ready-gate.ps1")))
+        d = d.Parent;
+    repoRoot = d?.FullName ?? Path.GetDirectoryName(AppContext.BaseDirectory) ?? AppContext.BaseDirectory;
+}
+
 // Phase 29: Autonomous Self-Improvement Engine (24/7, lowest priority)
 var selfImprovementStore  = new SelfImprovementStore();
 var resourceGuard         = new ResourceGuard();
 var selfAnalyzer          = new SelfAnalyzer(procedureStore, toolStore, traceService);
 var selfGitManager        = new SelfGitManager();
+// Phase 34: Code Patcher — reuses searchOrchestrator (already instantiated) + selfGitManager + repoRoot
+var codePatcher = new CodePatcher(llmAdapter, selfGitManager, repoRoot);
 var selfImprovementEngine = new SelfImprovementEngine(
     selfAnalyzer, selfImprovementStore, resourceGuard,
-    procedureStore, toolStore, traceService, llmAdapter, selfGitManager);
+    procedureStore, toolStore, traceService, llmAdapter, selfGitManager,
+    searchOrchestrator,   // Phase 34: real web research (DuckDuckGo + Tor)
+    codePatcher);         // Phase 34: real code patching (LLM → build → test → commit)
 selfImprovementEngine.Start();
 
 // Phase 30: Ubuntu OS Autonomy Engine
@@ -130,14 +144,7 @@ if (string.IsNullOrWhiteSpace(sandboxRoot))
     sandboxRoot = Path.Combine(Path.GetTempPath(), "ArchimedesSandbox");
 sandboxRoot = Path.GetFullPath(sandboxRoot);
 var releasesRoot = Path.Combine(storageManager.RootInternal, "releases");
-var repoRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_REPO_ROOT");
-if (string.IsNullOrEmpty(repoRoot))
-{
-    var d = new DirectoryInfo(AppContext.BaseDirectory);
-    while (d != null && !File.Exists(Path.Combine(d.FullName, "scripts", "phase14-ready-gate.ps1")))
-        d = d.Parent;
-    repoRoot = d?.FullName ?? Path.GetDirectoryName(AppContext.BaseDirectory) ?? AppContext.BaseDirectory;
-}
+// repoRoot already computed above (Phase 29/34 section)
 var sandboxRunner = new SandboxRunner(sandboxRoot, repoRoot, selfUpdateAudit);
 var promotionManager = new PromotionManager(releasesRoot, selfUpdateAudit);
 

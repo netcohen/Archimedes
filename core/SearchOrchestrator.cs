@@ -430,6 +430,49 @@ Queries:";
 
     public bool IsTorAvailable => _torHttp != null;
 
+    // ── General-purpose web research (Phase 34) ────────────────────────────
+
+    /// <summary>
+    /// Searches DuckDuckGo for a research topic and returns raw text snippets.
+    /// Used by SelfImprovementEngine.ExecuteResearch() for real web access.
+    /// Automatically uses Tor proxy for deep/dark web if available.
+    /// Falls back gracefully — never throws (returns empty list on failure).
+    /// </summary>
+    public async Task<List<string>> ResearchTopicAsync(string topic, CancellationToken ct = default)
+    {
+        var client  = _torHttp ?? _http;
+        var encoded = Uri.EscapeDataString(topic);
+        var url     = $"https://html.duckduckgo.com/html/?q={encoded}";
+
+        try
+        {
+            var html     = await client.GetStringAsync(url, ct);
+            var snippets = new List<string>();
+
+            // Reuse same snippet regex as SearchDuckDuckGo()
+            var matches = Regex.Matches(html,
+                @"<a[^>]+class=""result__snippet""[^>]*>(.*?)</a>",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+            foreach (Match m in matches.Take(5))
+            {
+                var snippet = Regex.Replace(m.Groups[1].Value, "<[^>]+>", "").Trim();
+                snippet = HttpUtility.HtmlDecode(snippet);
+                if (snippet.Length > 20)
+                    snippets.Add(snippet);
+            }
+
+            ArchLogger.LogInfo($"[Search] Research '{topic[..Math.Min(40, topic.Length)]}' → {snippets.Count} snippets" +
+                               (_torHttp != null ? " (via Tor)" : ""));
+            return snippets;
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn($"[Search] ResearchTopicAsync failed for '{topic}': {ex.Message}");
+            return [];
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static string? ExtractJsonArray(string text)

@@ -95,6 +95,10 @@ public sealed class SelfAnalyzer
         if (_cycleCount % 4 == 0)
             items.Add(CreateAndroidAppItem());
 
+        // Phase 34: real code patching — every 8 cycles (~2h at 15s/item)
+        if (_cycleCount % 8 == 0)
+            items.Add(CreatePatchItem());
+
         // Always return at least `count` items sorted by priority
         return items
             .OrderByDescending(i => i.Priority)
@@ -256,6 +260,17 @@ public sealed class SelfAnalyzer
             Priority    = 5,
         };
     }
+
+    /// <summary>
+    /// Phase 34: Generate a code-patching work item.
+    /// CodePatcher selects the actual target from its safe-targets list.
+    /// </summary>
+    private static SelfWorkItem CreatePatchItem() => new()
+    {
+        Type        = SelfWorkType.PATCH_CORE_CODE,
+        Description = "שיפור קוד Core — LLM ישפר שיטה קיימת, יאמת build+tests, ויבצע commit",
+        Priority    = 7,
+    };
 
     private SelfWorkItem NextPromptExperiment()
     {
