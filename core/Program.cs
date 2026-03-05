@@ -2446,6 +2446,24 @@ app.MapPost("/os/logs/cleanup", async (HttpRequest req) =>
     return Results.Json(result);
 });
 
+// Phase 37: Kiosk dashboard — serve web/dashboard.html at GET /dashboard
+// The file lives at $ARCHIMEDES_REPO_ROOT/web/dashboard.html (same repo, no extra server needed).
+app.MapGet("/dashboard", () =>
+{
+    var htmlFile = Path.Combine(repoRoot, "web", "dashboard.html");
+    if (!File.Exists(htmlFile))
+    {
+        var fallback = "<html><body style='background:#080c10;color:#00d4aa;font-family:monospace;padding:40px'>" +
+                       "<h1>&#x2B21; ARCHIMEDES</h1><p>Dashboard not found.</p>" +
+                       $"<p style='color:#3d5068'>Expected: {htmlFile}</p>" +
+                       "<p><a style='color:#00d4aa' href='/health'>/health</a> &nbsp; " +
+                       "<a style='color:#00d4aa' href='/selfimprove/status'>/selfimprove/status</a></p></body></html>";
+        return Results.Content(fallback, "text/html");
+    }
+    var html = File.ReadAllText(htmlFile);
+    return Results.Content(html, "text/html; charset=utf-8");
+});
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("ARCHIMEDES_PORT"), out var p) ? p : 5051;
 app.Urls.Add($"http://localhost:{port}");
 Console.WriteLine($"Archimedes Core listening on http://localhost:{port}");

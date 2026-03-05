@@ -109,6 +109,31 @@ fi
 ok "Internet connectivity confirmed"
 
 # =============================================================================
+#  STEP 0.5 — Disable system sleep / suspend (Phase 37)
+# =============================================================================
+
+section "Step 0.5 — Disabling system sleep / suspend"
+
+# Mask all sleep-related systemd targets — survives reboots
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+
+# Drop-in logind config: no lid-close suspend, no idle suspend
+sudo mkdir -p /etc/systemd/logind.conf.d
+sudo tee /etc/systemd/logind.conf.d/archimedes-no-sleep.conf > /dev/null << 'LOGINDCONF'
+[Login]
+HandleLidSwitch=ignore
+HandleLidSwitchDocked=ignore
+HandleLidSwitchExternalPower=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+IdleAction=ignore
+IdleActionSec=0
+LOGINDCONF
+
+sudo systemctl restart systemd-logind 2>/dev/null || true
+ok "System sleep/suspend permanently disabled"
+
+# =============================================================================
 #  STEP 1 — System packages
 # =============================================================================
 
@@ -446,6 +471,101 @@ echo -e "  Self-improve: ${GRAY}$SI_STATUS${NC}"
 # =============================================================================
 #  DONE
 # =============================================================================
+
+# =============================================================================
+#  STEP 12 — Kiosk display: Chromium fullscreen on TTY1 (Phase 37)
+# =============================================================================
+
+section "Step 12 — Kiosk display (Chromium kiosk on TTY1)"
+
+# Install minimal X11 + window manager + Chromium + cursor hider
+info "Installing X11 + Openbox + Chromium…"
+sudo apt-get install -y -qq xorg openbox unclutter 2>/dev/null || warn "Some kiosk packages failed — continuing"
+
+# Chromium: try apt then snap
+if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/null; then
+    sudo apt-get install -y -qq chromium-browser 2>/dev/null \
+    || sudo snap install chromium 2>/dev/null \
+    || warn "Chromium not installed — kiosk browser unavailable"
+fi
+
+CHROMIUM_BIN=$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || echo "")
+[ -n "$CHROMIUM_BIN" ] && ok "Browser: $CHROMIUM_BIN" || warn "Browser binary not found"
+
+# ── Auto-login on TTY1 ──────────────────────────────────────────────────
+sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf > /dev/null << AUTOLOGIN
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
+AUTOLOGIN
+sudo systemctl daemon-reload
+ok "Auto-login on TTY1 configured for user: $USER"
+
+# ── .bash_profile: auto-start X on TTY1 ────────────────────────────────
+BASH_PROF="$HOME/.bash_profile"
+if ! grep -q "ARCHIMEDES_KIOSK" "$BASH_PROF" 2>/dev/null; then
+    cat >> "$BASH_PROF" << 'XSTART'
+
+# ARCHIMEDES_KIOSK: auto-start X kiosk when logged in on TTY1
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    exec startx -- -nocursor 2>/tmp/archimedes-xstart.log
+fi
+XSTART
+    ok ".bash_profile updated (auto-start X on TTY1)"
+else
+    ok ".bash_profile already configured for kiosk"
+fi
+
+# ── .xinitrc: disable blanking + launch Chromium kiosk ─────────────────
+cat > "$HOME/.xinitrc" << XINITRC
+#!/bin/bash
+# Archimedes kiosk — written by bootstrap.sh
+
+# Disable all screen-saver / DPMS / blanking
+xset s off
+xset s noblank
+xset -dpms
+xset q &>/dev/null
+
+# Hide idle cursor
+unclutter -idle 1 -root &
+
+# Minimal window manager (no taskbar, no decorations)
+openbox &
+
+# Wait up to 60 s for Core to be ready
+for i in \$(seq 1 30); do
+    curl -sf http://localhost:$CORE_PORT/health >/dev/null 2>&1 && break
+    sleep 2
+done
+
+# Resolve chromium binary
+CHROMIUM=\$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null)
+if [ -z "\$CHROMIUM" ]; then
+    xmessage -center "Chromium not found — Archimedes Core running on http://localhost:$CORE_PORT"
+    exit 1
+fi
+
+# Launch Chromium in kiosk mode
+exec "\$CHROMIUM" \\
+    --kiosk \\
+    --no-first-run \\
+    --disable-infobars \\
+    --disable-session-crashed-bubble \\
+    --disable-restore-session-state \\
+    --noerrdialogs \\
+    --disable-translate \\
+    --check-for-update-interval=31536000 \\
+    --window-position=0,0 \\
+    http://localhost:$CORE_PORT/dashboard
+XINITRC
+chmod +x "$HOME/.xinitrc"
+ok "Kiosk configured: Chromium → http://localhost:$CORE_PORT/dashboard"
+
+info ""
+info "  Kiosk starts automatically on next reboot."
+info "  To start now (if you have a display):  startx"
 
 echo ""
 echo -e "${BOLD}${GREEN}"

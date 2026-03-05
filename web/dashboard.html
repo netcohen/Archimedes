@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Archimedes</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg:       #080c10;
+            --surface:  #0f1420;
+            --surface2: #141c2a;
+            --border:   #1a2538;
+            --accent:   #00d4aa;
+            --accent2:  #0090ff;
+            --warn:     #f5a623;
+            --danger:   #ff4455;
+            --text:     #c8d6e5;
+            --muted:    #3d5068;
+            --green:    #00ff9d;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', 'Lucida Console', monospace;
+            font-size: 13px;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            user-select: none;
+        }
+
+        /* ── Header ── */
+        #header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 9px 20px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .logo {
+            font-size: 17px;
+            font-weight: bold;
+            color: var(--accent);
+            letter-spacing: 4px;
+        }
+
+        .status-dot {
+            width: 9px; height: 9px;
+            border-radius: 50%;
+            background: var(--muted);
+            flex-shrink: 0;
+        }
+        .status-dot.online  { background: var(--green); box-shadow: 0 0 7px var(--green); animation: blink 2.4s infinite; }
+        .status-dot.offline { background: var(--danger); }
+
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+        #header-status { color: var(--accent); font-size: 11px; }
+        #uptime, #llm-badge { color: var(--muted); font-size: 11px; }
+        .sep { color: var(--border); }
+        #clock { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+        /* ── Grid ── */
+        #main {
+            display: grid;
+            grid-template-columns: 220px 1fr 250px;
+            grid-template-rows: 1fr 155px;
+            gap: 1px;
+            background: var(--border);
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .panel {
+            background: var(--bg);
+            padding: 11px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            overflow: hidden;
+        }
+
+        .ptitle {
+            font-size: 9px;
+            letter-spacing: 2.5px;
+            color: var(--muted);
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 5px;
+            flex-shrink: 0;
+        }
+
+        /* ── Stat rows ── */
+        .sr { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
+        .sl { color: var(--muted); font-size: 11px; }
+        .sv { font-size: 11px; }
+        .sv.ok   { color: var(--green); }
+        .sv.warn { color: var(--warn); }
+        .sv.err  { color: var(--danger); }
+        .sv.dim  { color: var(--muted); }
+
+        /* ── Bars ── */
+        .bw { display: flex; align-items: center; gap: 7px; }
+        .bb { flex:1; height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+        .bf { height: 100%; background: var(--accent); border-radius: 2px; transition: width .5s; }
+        .bf.warn { background: var(--warn); }
+        .bf.crit { background: var(--danger); }
+        .bl { font-size: 10px; color: var(--muted); width: 32px; text-align: right; }
+
+        /* ── Scrollable inner ── */
+        .si { overflow-y: auto; flex: 1; }
+        .si::-webkit-scrollbar { width: 2px; }
+        .si::-webkit-scrollbar-thumb { background: var(--border); }
+
+        /* ── Tasks ── */
+        .task {
+            padding: 5px 8px;
+            background: var(--surface);
+            border-left: 3px solid var(--muted);
+            margin-bottom: 4px;
+            border-radius: 0 3px 3px 0;
+        }
+        .task.running   { border-left-color: var(--accent2); }
+        .task.pending   { border-left-color: var(--muted); }
+        .task.completed { border-left-color: var(--green); }
+        .task.failed    { border-left-color: var(--danger); }
+        .task-intent    { color: var(--text); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .task-meta      { color: var(--muted); font-size: 10px; margin-top: 2px; }
+
+        /* ── Goal items ── */
+        .goal {
+            padding: 4px 6px;
+            background: var(--surface);
+            border-radius: 3px;
+            margin-bottom: 3px;
+        }
+        .goal-title { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .goal-state { font-size: 9px; color: var(--muted); margin-top: 1px; }
+
+        /* ── Insight items ── */
+        .insight {
+            padding: 3px 6px;
+            background: var(--surface);
+            border-radius: 3px;
+            font-size: 10px;
+            margin-bottom: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* ── Log panel ── */
+        #log-panel { grid-column: 1 / -1; grid-row: 2; background: var(--surface); }
+        #log-lines { font-size: 11px; line-height: 1.55; }
+        .ll { padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ll.info { color: var(--text); }
+        .ll.warn { color: var(--warn); }
+        .ll.err  { color: var(--danger); }
+        .ll.ok   { color: var(--green); }
+        .ll.dim  { color: var(--muted); }
+
+        .empty { color: var(--muted); font-size: 11px; padding: 6px 0; }
+
+        /* ── SI stat numbers ── */
+        .si-cycle-num { font-size: 28px; color: var(--accent); text-align: center; padding: 4px 0 2px; }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+    <span class="logo">⬡ ARCHIMEDES</span>
+    <div class="status-dot" id="sdot"></div>
+    <span id="header-status">connecting…</span>
+    <span class="sep">|</span>
+    <span id="uptime">uptime: —</span>
+    <span class="sep">|</span>
+    <span id="llm-badge">LLM: —</span>
+    <span id="clock"></span>
+</div>
+
+<!-- Main grid -->
+<div id="main">
+
+    <!-- Left: system + goals -->
+    <div class="panel">
+        <div class="ptitle">System</div>
+        <div class="sr"><span class="sl">Core</span><span class="sv" id="s-core">—</span></div>
+        <div class="sr"><span class="sl">LLM</span><span class="sv" id="s-llm">—</span></div>
+        <div class="sr"><span class="sl">Tor</span><span class="sv" id="s-tor">—</span></div>
+        <div class="sr"><span class="sl">ADB</span><span class="sv" id="s-adb">—</span></div>
+
+        <div class="ptitle" style="margin-top:6px">Hardware</div>
+        <div class="sr" style="padding-bottom:0"><span class="sl">CPU</span></div>
+        <div class="bw"><div class="bb"><div class="bf" id="b-cpu"></div></div><span class="bl" id="v-cpu">—</span></div>
+        <div class="sr" style="padding-bottom:0"><span class="sl">RAM</span></div>
+        <div class="bw"><div class="bb"><div class="bf" id="b-mem"></div></div><span class="bl" id="v-mem">—</span></div>
+        <div class="sr" style="padding-bottom:0"><span class="sl">Disk</span></div>
+        <div class="bw"><div class="bb"><div class="bf" id="b-disk"></div></div><span class="bl" id="v-disk">—</span></div>
+
+        <div class="ptitle" style="margin-top:6px">Goals</div>
+        <div class="si" id="goals-list"><div class="empty">Loading…</div></div>
+    </div>
+
+    <!-- Center: tasks -->
+    <div class="panel">
+        <div class="ptitle">Active Tasks</div>
+        <div class="si" id="tasks-list"><div class="empty">No tasks</div></div>
+    </div>
+
+    <!-- Right: self-improvement -->
+    <div class="panel">
+        <div class="ptitle">Self-Improvement</div>
+        <div class="si-cycle-num" id="si-cycle">—</div>
+        <div class="sr"><span class="sl">Status</span><span class="sv" id="si-status">—</span></div>
+        <div class="sr"><span class="sl">CodePatcher</span><span class="sv" id="si-patcher">—</span></div>
+        <div class="sr"><span class="sl">Last patch</span><span class="sv dim" id="si-last">—</span></div>
+
+        <div class="ptitle" style="margin-top:6px">Recent Insights</div>
+        <div class="si" id="insights-list"><div class="empty">No insights yet</div></div>
+    </div>
+
+    <!-- Bottom: activity log -->
+    <div class="panel" id="log-panel">
+        <div class="ptitle">Activity Log</div>
+        <div class="si"><div id="log-lines"></div></div>
+    </div>
+
+</div>
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────
+const bootTime = Date.now();
+let   logBuf   = [];
+
+// ── Helpers ────────────────────────────────────────────────────────────
+const g = id => document.getElementById(id);
+
+async function api(path) {
+    try {
+        const r = await fetch(path, { signal: AbortSignal.timeout(4000) });
+        if (!r.ok) return null;
+        const ct = r.headers.get('content-type') || '';
+        return ct.includes('json') ? r.json() : r.text();
+    } catch { return null; }
+}
+
+function sv(id, val, cls) {
+    const e = g(id);
+    if (!e) return;
+    e.textContent = val;
+    if (cls !== undefined) e.className = 'sv ' + cls;
+}
+
+function setBar(bid, vid, pct) {
+    const b = g(bid), v = g(vid);
+    const p = Math.min(100, Math.max(0, pct || 0));
+    if (b) { b.style.width = p + '%'; b.className = 'bf' + (p > 89 ? ' crit' : p > 69 ? ' warn' : ''); }
+    if (v) v.textContent = Math.round(p) + '%';
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function ago(iso) {
+    if (!iso) return '—';
+    try {
+        const d = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+        if (d < 5)    return 'just now';
+        if (d < 60)   return d + 's ago';
+        if (d < 3600) return Math.floor(d / 60) + 'm ago';
+        return Math.floor(d / 3600) + 'h ago';
+    } catch { return '—'; }
+}
+
+function fmtUp(ms) {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    if (d > 0) return d + 'd ' + (h % 24) + 'h';
+    if (h > 0) return h + 'h ' + (m % 60) + 'm';
+    return m + 'm ' + (s % 60) + 's';
+}
+
+function log(msg, cls = 'info') {
+    const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    logBuf.push({ ts, msg, cls });
+    if (logBuf.length > 60) logBuf.shift();
+    const e = g('log-lines');
+    if (e) e.innerHTML = logBuf.slice(-10).map(l =>
+        `<div class="ll ${l.cls}">[${esc(l.ts)}] ${esc(l.msg)}</div>`
+    ).join('');
+}
+
+function first(...vals) {
+    for (const v of vals) if (v !== undefined && v !== null) return v;
+    return null;
+}
+
+// ── Clock ──────────────────────────────────────────────────────────────
+function tick() {
+    g('clock').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    g('uptime').textContent = 'uptime: ' + fmtUp(Date.now() - bootTime);
+}
+setInterval(tick, 1000); tick();
+
+// ── Poll ───────────────────────────────────────────────────────────────
+async function poll() {
+
+    // ── Core health ──
+    const health = await api('/health');
+    const online = health !== null;
+    const dot = g('sdot');
+    if (dot) dot.className = 'status-dot ' + (online ? 'online' : 'offline');
+    g('header-status').textContent = online ? 'ONLINE' : 'OFFLINE';
+    sv('s-core', online ? 'online' : 'offline', online ? 'ok' : 'err');
+
+    // ── LLM health ──
+    const llm = await api('/llm/health');
+    const llmOk = llm && (llm.status === 'ok' || llm.loaded === true || llm.Status === 'ok');
+    sv('s-llm', llmOk ? 'loaded' : (llm ? 'loading…' : 'offline'), llmOk ? 'ok' : 'warn');
+    g('llm-badge').textContent = 'LLM: ' + (llmOk ? 'OK' : '…');
+
+    // ── OS status ──
+    const os = await api('/os/status');
+    if (os) {
+        const torOk = first(os.torRunning, os.TorRunning);
+        const adbOk = first(os.adbAvailable, os.AdbAvailable);
+        sv('s-tor', torOk ? 'active' : 'inactive', torOk ? 'ok' : 'warn');
+        sv('s-adb', adbOk ? 'ready' : 'n/a',      adbOk ? 'ok' : 'dim');
+    }
+
+    // ── Hardware ──
+    const hw = await api('/os/hardware');
+    if (hw) {
+        const cpu  = first(hw.cpuPercent, hw.CpuPercent, hw.cpu) || 0;
+        const ramP = first(hw.memoryPercent, hw.MemoryPercent) ||
+                     (hw.usedMemoryMb && hw.totalMemoryMb ? hw.usedMemoryMb / hw.totalMemoryMb * 100 : 0);
+        const dskP = first(hw.diskPercent, hw.DiskPercent) ||
+                     (hw.usedDiskGb && hw.totalDiskGb ? hw.usedDiskGb / hw.totalDiskGb * 100 : 0);
+        setBar('b-cpu',  'v-cpu',  cpu);
+        setBar('b-mem',  'v-mem',  ramP);
+        setBar('b-disk', 'v-disk', dskP);
+    }
+
+    // ── Tasks ──
+    const tasks = await api('/tasks');
+    const tl = g('tasks-list');
+    if (tl && Array.isArray(tasks)) {
+        tl.innerHTML = tasks.length === 0
+            ? '<div class="empty">No active tasks</div>'
+            : tasks.slice(0, 15).map(t => {
+                const st  = (t.status || t.Status || 'pending').toLowerCase();
+                const int = t.intent || t.Intent || t.id || t.Id || '—';
+                const at  = t.createdAt || t.CreatedAt || t.startedAt;
+                return `<div class="task ${st}">
+                    <div class="task-intent">${esc(int)}</div>
+                    <div class="task-meta">${esc(st)} · ${ago(at)}</div>
+                </div>`;
+            }).join('');
+    }
+
+    // ── Goals ──
+    const goals = await api('/goals');
+    const gl = g('goals-list');
+    if (gl && Array.isArray(goals)) {
+        gl.innerHTML = goals.length === 0
+            ? '<div class="empty">No goals</div>'
+            : goals.slice(0, 8).map(go => {
+                const t  = go.title || go.Title || go.intent || go.id || '—';
+                const st = (go.state || go.State || '').toLowerCase();
+                return `<div class="goal">
+                    <div class="goal-title">${esc(t)}</div>
+                    <div class="goal-state">${esc(st)}</div>
+                </div>`;
+            }).join('');
+    }
+
+    // ── Self-improvement ──
+    const si = await api('/selfimprove/status');
+    if (si) {
+        const cycle   = first(si.cycle, si.CycleCount, si.cycleCount) ?? '—';
+        const running = first(si.running, si.Running, si.isRunning);
+        const hold    = first(si.codePatcherHoldUntil, si.CodePatcherHoldUntil);
+        const pEn     = first(si.codePatcherEnabled, si.CodePatcherEnabled);
+
+        g('si-cycle').textContent = cycle;
+        sv('si-status', running ? 'running' : 'idle', running ? 'ok' : 'warn');
+
+        if (hold && new Date(hold) > new Date()) {
+            const left = Math.ceil((new Date(hold) - Date.now()) / 3600000);
+            sv('si-patcher', `hold ${left}h left`, 'warn');
+        } else {
+            sv('si-patcher', pEn === false ? 'disabled' : 'active', pEn === false ? 'warn' : 'ok');
+        }
+    }
+
+    // ── Self-improve history ──
+    const hist = await api('/selfimprove/history?limit=1');
+    if (Array.isArray(hist) && hist.length) {
+        const ts = first(hist[0].completedAt, hist[0].CompletedAt, hist[0].timestamp);
+        g('si-last').textContent = ago(ts);
+    }
+
+    // ── Insights ──
+    const ins = await api('/selfimprove/insights?limit=6');
+    const il = g('insights-list');
+    if (il && Array.isArray(ins)) {
+        il.innerHTML = ins.length === 0
+            ? '<div class="empty">No insights yet</div>'
+            : ins.slice(0, 6).map(i => {
+                const txt = first(i.text, i.Text, i.summary, i.Summary) || JSON.stringify(i);
+                return `<div class="insight" title="${esc(txt)}">${esc(txt)}</div>`;
+            }).join('');
+    }
+
+    // ── Git log ──
+    const gitLog = await api('/selfimprove/git-log');
+    if (gitLog && typeof gitLog === 'string') {
+        gitLog.trim().split('\n').slice(0, 2).forEach(l => {
+            if (l.trim()) log('[git] ' + l.trim(), 'ok');
+        });
+    }
+}
+
+// Boot
+log('Dashboard started', 'ok');
+poll();
+setInterval(poll, 6000);
+</script>
+</body>
+</html>
