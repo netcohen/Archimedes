@@ -20,6 +20,16 @@ const CORE_URL = "http://localhost:5051";
 
 const envelopeQueue: string[] = [];
 
+// Phase 32: Device registry — stores per-device info (IP, FCM token) for OTA updates
+interface DeviceInfo { deviceId: string; fcmToken?: string; ip?: string; updatedAt: string; }
+const _deviceRegistry = new Map<string, DeviceInfo>();
+function registerDevice(deviceId: string, patch: Partial<Omit<DeviceInfo, 'deviceId' | 'updatedAt'>>): DeviceInfo {
+  const existing = _deviceRegistry.get(deviceId) ?? { deviceId, updatedAt: new Date().toISOString() };
+  const updated  = { ...existing, ...patch, deviceId, updatedAt: new Date().toISOString() };
+  _deviceRegistry.set(deviceId, updated);
+  return updated;
+}
+
 const server = http.createServer((req, res) => {
   if (handleTestsite(req, res)) {
     return;
@@ -252,19 +262,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── Phase 31: FCM Token Registration ────────────────────────────────────
+  // ── Phase 31/32: FCM Token Registration + Device Registry ───────────────
   if (req.method === "POST" && req.url === "/fcm/register-token") {
     let body = "";
     req.on("data", (chunk) => (body += chunk.toString()));
     req.on("end", () => {
       try {
-        const { deviceId, token } = JSON.parse(body);
+        // ip is optional — sent by Android app on startup (local WiFi IP for ADB OTA)
+        const { deviceId, token, ip } = JSON.parse(body);
         if (!deviceId || !token) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "deviceId and token required" }));
           return;
         }
         registerToken(deviceId, token);
+        // Phase 32: store in device registry for OTA IP resolution
+        registerDevice(deviceId, { fcmToken: token, ip: ip ?? undefined });
+        if (ip) console.log(`[DeviceRegistry] Device ${deviceId} IP: ${ip}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, deviceId }));
       } catch (e) {
@@ -272,6 +286,28 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: String(e) }));
       }
     });
+    return;
+  }
+
+  // ── Phase 32: Device info (IP + FCM token) for OTA updater ───────────────
+  if (req.method === "GET" && req.url?.match(/^\/v1\/android\/device\/[^/]+$/)) {
+    const deviceId = req.url.split("/").pop() || "";
+    const info = _deviceRegistry.get(deviceId);
+    if (!info) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Device not found", deviceId }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(info));
+    return;
+  }
+
+  // Phase 32: List all registered devices
+  if (req.method === "GET" && req.url === "/v1/android/devices") {
+    const devices = Array.from(_deviceRegistry.values());
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(devices));
     return;
   }
 

@@ -112,6 +112,9 @@ var androidBridgeHttp = httpClientFactory.CreateClient();
 var androidBridge     = new AndroidBridge(androidBridgeHttp, taskService, goalEngine, llmAdapter);
 androidBridge.Start();
 
+// Phase 32: Android App OTA Updater (ADB WiFi)
+var appUpdater = new AppUpdater(httpClientFactory.CreateClient(), androidBridge);
+
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
 
@@ -941,6 +944,31 @@ app.MapPost("/android/notify", async (HttpRequest req) =>
     await androidBridge.NotifyAsync(title, notifBody, data);
     return Results.Json(new { ok = true, title });
 });
+
+// Phase 32: POST /android/update — trigger OTA update via ADB WiFi
+app.MapPost("/android/update", async (HttpRequest req) =>
+{
+    using var sr = new StreamReader(req.Body);
+    var body     = await sr.ReadToEndAsync();
+    string? deviceId = null;
+    string? phoneIp  = null;
+    if (!string.IsNullOrWhiteSpace(body))
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("deviceId", out var d)) deviceId = d.GetString();
+            if (doc.RootElement.TryGetProperty("phoneIp",  out var p)) phoneIp  = p.GetString();
+        }
+        catch { /* optional body */ }
+    }
+    var result = await appUpdater.StartUpdateAsync(deviceId, phoneIp);
+    return Results.Json(result);
+});
+
+// Phase 32: GET /android/update/status — check OTA update progress
+app.MapGet("/android/update/status", () =>
+    Results.Json(appUpdater.GetStatus()));
 
 // POST /chat/message — routes a user message through LLM → optionally creates a task
 app.MapPost("/chat/message", async (HttpRequest req) =>

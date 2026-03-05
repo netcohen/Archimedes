@@ -2026,4 +2026,43 @@ Android App ──HTTP──▶ Net service ──HTTP──▶ Core
 1. הגדר `GOOGLE_APPLICATION_CREDENTIALS` ב-Net service (service account JSON)
 2. הרץ `POST /fcm/register-token { deviceId, token }` מהאפליקציה
 
-**Gate:** 83/83 PASS (`scripts/phase31-ready-gate.ps1`)
+**Gate:** 109/109 PASS (`scripts/phase31-ready-gate.ps1`)
+
+---
+
+## Phase 32 — Android OTA Updater (ADB WiFi)
+
+**מטרה:** ארכימדס מעדכן את האפליקציה אוטומטית ללא כבל USB, דרך ADB WiFi.
+
+**ארכיטקטורה:**
+```
+Android מדווח IP מקומי (WiFi) → Net שומר → Core מאחזר
+Core מפעיל scripts/update-android.sh <ip>
+  → ./gradlew assembleDebug     (בונה APK)
+  → adb connect <ip>:5555       (WiFi debug)
+  → adb install -r app.apk     (מתקין)
+Core שולח FCM push: "האפליקציה עודכנה ✓"
+```
+
+**מה נבנה:**
+- `scripts/update-android.sh` — סקריפט bash ל-Ubuntu: Gradle build + ADB WiFi install
+- `core/AppUpdater.cs` — C# orchestrator: מאחזר IP מ-Net, מריץ סקריפט, שולח FCM
+- `core/Program.cs` — `POST /android/update` + `GET /android/update/status`
+- `net/src/index.ts` — device registry: שומר IP + FCM token per device; `GET /v1/android/device/:id`
+- `android/app/ArchimedesApp.kt` — `getLocalIpAddress()`: מדווח IP WiFi ל-Net ול-Firestore
+
+**הפעלת ADB WiFi (חד-פעמי):**
+- Android 11+: Settings → Developer options → Wireless debugging → Pair QR
+- Android ישן: חבר USB פעם אחת → `adb tcpip 5555` → נתק
+
+**Trigger:**
+```powershell
+# מ-PowerShell / מ-Core:
+Invoke-RestMethod http://localhost:5051/android/update -Method POST
+# → { ok: true, status: "started", phoneIp: "192.168.1.x" }
+
+Invoke-RestMethod http://localhost:5051/android/update/status
+# → { running: false, lastStatus: "done: Installation complete ✓", adbAvailable: true }
+```
+
+**Gate:** `scripts/phase32-ota-gate.ps1`
