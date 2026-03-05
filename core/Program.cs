@@ -1064,6 +1064,39 @@ app.MapPost("/chat/message", async (HttpRequest req) =>
     }
 });
 
+// POST /chat/ask — free-form conversation with the LLM (no intent routing)
+app.MapPost("/chat/ask", async (HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    string message;
+    try
+    {
+        var doc = JsonDocument.Parse(body);
+        message = doc.RootElement.TryGetProperty("message", out var m) ? m.GetString() ?? "" : body;
+    }
+    catch { message = body; }
+
+    if (string.IsNullOrWhiteSpace(message))
+        return Results.BadRequest(new { error = "message required" });
+
+    availabilityEngine.RecordInteraction("chat");
+
+    const string systemPrompt =
+        "אתה ארכימדס — סוכן AI אוטונומי שרץ 24/7 על מחשב ייעודי. " +
+        "אתה מבצע משימות אוטומטיות באינטרנט ומשפר את עצמך בלי הפסקה. " +
+        "ענה בעברית בצורה קצרה וברורה. " +
+        "אם המשתמש מבקש לבצע פעולה (נטור, ייצא, הורד) — הצע לו לנסח את זה כפקודה ספציפית. " +
+        "אל תהיה פורמלי מדי — אתה שותף עבודה.";
+
+    var reply = await llmAdapter.AskAsync(systemPrompt, message, 400);
+
+    if (string.IsNullOrWhiteSpace(reply))
+        reply = "המודל עדיין נטען — נסה שוב בעוד כמה שניות.";
+
+    return Results.Json(new { reply });
+});
+
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────
 
 // List all stored procedures
