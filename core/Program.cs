@@ -1082,12 +1082,14 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
 
     availabilityEngine.RecordInteraction("chat");
 
+    // English system prompt — Llama 3.2-3B is English-first.
+    // Hebrew instructions confuse it; it will still respond in Hebrew when the user writes Hebrew.
     const string systemPrompt =
-        "אתה ארכימדס — סוכן AI אוטונומי שרץ 24/7 על מחשב ייעודי. " +
-        "אתה מבצע משימות אוטומטיות באינטרנט ומשפר את עצמך בלי הפסקה. " +
-        "ענה בעברית בצורה קצרה וברורה. " +
-        "אם המשתמש מבקש לבצע פעולה (נטור, ייצא, הורד) — הצע לו לנסח את זה כפקודה ספציפית. " +
-        "אל תהיה פורמלי מדי — אתה שותף עבודה.";
+        "You are Archimedes, an autonomous AI agent running 24/7 on a dedicated Linux machine. " +
+        "You monitor websites, extract data, run shell commands, and continuously self-improve. " +
+        "Reply in the same language the user writes in (Hebrew or English). Keep answers short and direct. " +
+        "If the user asks you to do something on the system (install software, change settings, run a command), " +
+        "say you will do it and describe the action briefly. You are a capable work partner, not a passive chatbot.";
 
     var reply = await llmAdapter.AskAsync(systemPrompt, message, 400);
 

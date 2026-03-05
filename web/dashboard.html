@@ -436,13 +436,20 @@ async function poll() {
     }
 
     // ── Hardware ──
-    const hw = await api('/os/hardware');
-    if (hw) {
-        const cpu  = first(hw.cpuPercent, hw.CpuPercent, hw.cpu) || 0;
-        const ramP = first(hw.memoryPercent, hw.MemoryPercent) ||
-                     (hw.usedMemoryMb && hw.totalMemoryMb ? hw.usedMemoryMb / hw.totalMemoryMb * 100 : 0);
-        const dskP = first(hw.diskPercent, hw.DiskPercent) ||
-                     (hw.usedDiskGb && hw.totalDiskGb ? hw.usedDiskGb / hw.totalDiskGb * 100 : 0);
+    // /os/hardware returns: { ramUsedMb, ramTotalMb, ramUsedPercent, disks:[{usedPercent,...}] }
+    // /system/metrics returns: { cpuPercent, ramUsedMb, ramTotalMb, uptimeSeconds }
+    const hw  = await api('/os/hardware');
+    const sys = await api('/system/metrics');
+    if (hw || sys) {
+        // CPU % — from /system/metrics (process CPU, best available)
+        const cpu  = first(sys && sys.cpuPercent, sys && sys.CpuPercent) || 0;
+        // RAM % — from /os/hardware (system-wide)
+        const ramP = first(hw && hw.ramUsedPercent, hw && hw.RamUsedPercent) ||
+                     (hw && hw.ramUsedMb && hw.ramTotalMb
+                         ? hw.ramUsedMb / hw.ramTotalMb * 100 : 0);
+        // Disk % — first disk in /os/hardware disks array
+        const disk0 = hw && Array.isArray(hw.disks) && hw.disks.length > 0 ? hw.disks[0] : null;
+        const dskP  = first(disk0 && disk0.usedPercent, disk0 && disk0.UsedPercent) || 0;
         setBar('b-cpu',  'v-cpu',  cpu);
         setBar('b-mem',  'v-mem',  ramP);
         setBar('b-disk', 'v-disk', dskP);

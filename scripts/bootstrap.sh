@@ -613,6 +613,10 @@ power-button-action='nothing'
 
 [org/gnome/desktop/notifications]
 show-banners=false
+
+[org/gnome/desktop/input-sources]
+sources=[('xkb', 'us'), ('xkb', 'il')]
+xkb-options=['grp:alt_shift_toggle']
 DCONFDB
 sudo dconf update 2>/dev/null && ok "dconf system policy: screen lock + idle disabled" \
     || warn "dconf update failed — may need manual run after reboot"
