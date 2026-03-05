@@ -14,7 +14,7 @@ import java.net.URL
 import java.security.KeyPairGenerator
 
 class PairingActivity : AppCompatActivity() {
-    private val coreUrl = "http://10.0.2.2:5051"
+    private val coreUrl get() = ServerConfig.getNetUrl(this).replace(":5052", ":5051").replace(":5052/", ":5051/")
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { handleQrContent(it) }

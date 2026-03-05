@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
+        android:name=".ArchimedesApp"
         android:usesCleartextTraffic="true"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -9,6 +12,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Archimedes">
+
+        <!-- Main status dashboard -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -17,10 +22,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".InboxActivity" android:exported="false" />
-        <activity android:name=".PairingActivity" android:exported="false" />
-        <activity android:name=".ApprovalActivity" android:exported="false" />
+
+        <!-- Existing activities -->
+        <activity android:name=".InboxActivity"       android:exported="false" />
+        <activity android:name=".PairingActivity"     android:exported="false" />
+        <activity android:name=".ApprovalActivity"    android:exported="false" />
         <activity android:name=".SecretInputActivity" android:exported="false" />
-        <activity android:name=".CaptchaActivity" android:exported="false" />
+        <activity android:name=".CaptchaActivity"     android:exported="false" />
+
+        <!-- Phase 31: New activities -->
+        <activity android:name=".TaskActivity"     android:exported="false" />
+        <activity android:name=".SettingsActivity" android:exported="false" />
+
     </application>
 </manifest>

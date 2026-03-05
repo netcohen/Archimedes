@@ -11,7 +11,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class SecretInputActivity : AppCompatActivity() {
-    private val netUrl = "http://10.0.2.2:5052"
+    private val netUrl get() = ServerConfig.getNetUrl(this)
     private var approvalId: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {

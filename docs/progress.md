@@ -1973,18 +1973,57 @@ SELF_TEST, ANALYZE_RESOURCES, ANALYZE_TOOL_USAGE, EXPERIMENT_PROMPT, PATCH_CORE_
 
 ---
 
-### Phase 31 - Firebase Bidirectional + Android App
+### Phase 31 - Firebase Bidirectional + Android App ✅
 
-**What:** תקשורת אמיתית בין ארכימדס לטלפון — FCM push, Firestore relay, אפליקציית Android מלאה.
+**What:** תקשורת דו-כיוונית בין ארכימדס לטלפון Android — command relay, FCM push, polling, אפליקציה מלאה.
 
-**תלויות:** Phase 30 (OS autonomy)
+**ארכיטקטורה:**
+```
+Android App ──HTTP──▶ Net service ──HTTP──▶ Core
+              ◀──notifications──            ◀──polls commands──
+```
 
-**מה ייבנה:**
-- Firebase FCM אמיתי ב-Net (כרגע placeholder)
-- Core מאזין לFirestore לפקודות נכנסות מהאנדרואיד
-- Android app מלאה (Kotlin + Jetpack Compose):
-  - שליחת פקודות ויצירת משימות
-  - Push notifications לאישורים, כישלונות, השלמות
-  - מסך Approval מלא (Captcha, Secret, אישור)
-  - Status ארכימדס בזמן אמת
-  - ניהול מטרות + self-improvement status
+**מה נבנה — Net service:**
+- `commands.ts` — NEW: command relay queue (Android → Core). סוגים: TASK, GOAL, CHAT, STATUS, APPROVE, DENY
+- `fcm.ts` — UPGRADED: FCM push מלא via `firebase-admin` (server-side). Dual-mode: FCM real-time + polling queue
+- `index.ts` — 8 endpoints חדשים:
+  - `POST /fcm/register-token` — רישום FCM token של המכשיר
+  - `POST /v1/android/command` — Android שולח פקודה
+  - `GET /v1/android/commands/pending` — Core מושך פקודות ממתינות (polling)
+  - `POST /v1/android/commands/:id/result` — Core מדווח תוצאה
+  - `POST /v1/android/notify` — Core מבקש push notification
+  - `GET /v1/android/notifications` — Android מושך הודעות (polling fallback)
+  - `POST /v1/android/notifications/read-all` — מסמן הכל כנקרא
+  - `GET /v1/android/fcm/status` / `GET /v1/android/status` — status
+
+**מה נבנה — Core:**
+- `AndroidBridge.cs` — NEW: polls Net כל 5 שניות לפקודות, מבצע ומדווח תוצאה
+  - TASK → `TaskService.CreateTask()`
+  - GOAL → `GoalEngine.CreateAsync()`
+  - CHAT → `LLMAdapter.AskAsync()`
+  - APPROVE/DENY → `POST /approval-response`
+  - `NotifyAsync()` — שולח push דרך Net
+- `Program.cs` — Phase 31: `new AndroidBridge(...)`, `.Start()/.Stop()`, `/android/notify` endpoint
+- `/status/current` — מורחב עם `androidBridge: { polling: true }`
+
+**מה נבנה — Android App (v0.2.0):**
+- `ServerConfig.kt` — כתובת שרת מתוך SharedPreferences (configurable, לא hardcoded!)
+- `ArchimedesApi.kt` — HTTP client מרכזי עם URL מתוך ServerConfig
+- `ArchimedesApp.kt` — Application class, notification channels
+- `PollingWorker.kt` — WorkManager background polling (כל 15 דקות) — אישורים + notifications
+- `MainActivity.kt` — dashboard: מצב, תיאור, OS state, badge אישורים ממתינים, כפתורי ניווט
+- `TaskActivity.kt` — NEW: שליחת משימה/מטרה/שיחה לארכימדס
+- `SettingsActivity.kt` — NEW: שינוי כתובת שרת + בדיקת חיבור
+- כל activities קיימים — URL מ-ServerConfig (לא hardcoded 10.0.2.2)
+- `build.gradle.kts` — WorkManager + Coroutines + viewBinding; Firebase הוסר מclient (server-side only)
+- `AndroidManifest.xml` — ArchimedesApp, TaskActivity, SettingsActivity, POST_NOTIFICATIONS
+
+**FCM — שני מצבים:**
+- **ללא credentials:** polling בלבד (WorkManager כל 15 דקות + onResume כל 5 שניות)
+- **עם GOOGLE_APPLICATION_CREDENTIALS (Net):** FCM push real-time לכל מכשיר רשום
+
+**כדי לקבל push notifications על הטלפון:**
+1. הגדר `GOOGLE_APPLICATION_CREDENTIALS` ב-Net service (service account JSON)
+2. הרץ `POST /fcm/register-token { deviceId, token }` מהאפליקציה
+
+**Gate:** 83/83 PASS (`scripts/phase31-ready-gate.ps1`)

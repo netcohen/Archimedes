@@ -12,7 +12,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class ApprovalActivity : AppCompatActivity() {
-    private val netUrl = "http://10.0.2.2:5052"
+
+    private val netUrl get() = ServerConfig.getNetUrl(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,19 +28,21 @@ class ApprovalActivity : AppCompatActivity() {
                 val arr = JSONArray(json)
                 runOnUiThread {
                     if (arr.length() == 0) {
-                        findViewById<TextView>(R.id.tvApproval).text = "No pending approvals"
+                        findViewById<TextView>(R.id.tvApproval).text = "אין אישורים ממתינים"
                         return@runOnUiThread
                     }
                     val first = arr.getJSONObject(0)
                     val taskId = first.optString("taskId", first.optString("TaskId", ""))
-                    val msg = first.optString("Message", first.optString("message", "Approve?"))
-                    findViewById<TextView>(R.id.tvApproval).text = msg
+                    val msg = first.optString("Message", first.optString("message", "לאשר?"))
+                    val count = arr.length()
+                    val countText = if (count > 1) " ($count ממתינים)" else ""
+                    findViewById<TextView>(R.id.tvApproval).text = "$msg$countText"
                     findViewById<Button>(R.id.btnApprove).setOnClickListener { sendResponse(taskId, true) }
                     findViewById<Button>(R.id.btnDeny).setOnClickListener { sendResponse(taskId, false) }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    findViewById<TextView>(R.id.tvApproval).text = "Error: ${e.message}"
+                    findViewById<TextView>(R.id.tvApproval).text = "שגיאה: ${e.message}"
                 }
             }
         }.start()
@@ -58,12 +61,14 @@ class ApprovalActivity : AppCompatActivity() {
                 conn.disconnect()
                 runOnUiThread {
                     if (code == 200) {
-                        Toast.makeText(this, if (approved) "Approved" else "Denied", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, if (approved) "✅ אושר" else "❌ נדחה", Toast.LENGTH_SHORT).show()
                         finish()
-                    } else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "שגיאה: $code", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
-                runOnUiThread { Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show() }
+                runOnUiThread { Toast.makeText(this, "שגיאה: ${e.message}", Toast.LENGTH_LONG).show() }
             }
         }.start()
     }

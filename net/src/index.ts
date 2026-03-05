@@ -3,6 +3,14 @@ import { getEnvelopeStore, getCurrentMode, healthCheck } from "./firestore";
 import { safeLogPayload, safeLog } from "./redactor";
 import { handleTestsite } from "./testsite";
 import { runBrowserSteps, getRunStatus, getAllRuns, isBrowserAvailable, BrowserStep } from "./browser";
+import {
+  registerToken, sendToDevice, sendToAll, getPendingNotifications,
+  markRead, markAllRead, getStatus as getFcmStatus, FcmPayload
+} from "./fcm";
+import {
+  createCommand, getPendingCommands, updateCommand, getCommand,
+  getAllCommands, purgeOldCommands, CommandType
+} from "./commands";
 
 const PORT = parseInt(process.env.PORT || "5052", 10);
 const CORE_URL = "http://localhost:5051";
@@ -238,6 +246,166 @@ const server = http.createServer((req, res) => {
     const runs = getAllRuns();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(runs));
+    return;
+  }
+
+  // ── Phase 31: FCM Token Registration ────────────────────────────────────
+  if (req.method === "POST" && req.url === "/fcm/register-token") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", () => {
+      try {
+        const { deviceId, token } = JSON.parse(body);
+        if (!deviceId || !token) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "deviceId and token required" }));
+          return;
+        }
+        registerToken(deviceId, token);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, deviceId }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  // ── Phase 31: Android → Core commands ────────────────────────────────────
+  if (req.method === "POST" && req.url === "/v1/android/command") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", () => {
+      try {
+        const { type, payload, deviceId } = JSON.parse(body);
+        if (!type) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "type required" }));
+          return;
+        }
+        const cmd = createCommand(type as CommandType, payload ?? {}, deviceId ?? "unknown");
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: cmd.id, status: cmd.status }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/v1/android/commands/pending") {
+    purgeOldCommands();
+    const pending = getPendingCommands();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(pending));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/v1/android/commands") {
+    const all = getAllCommands();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(all));
+    return;
+  }
+
+  if (req.method === "POST" && req.url?.match(/^\/v1\/android\/commands\/[^/]+\/result$/)) {
+    const cmdId = req.url.split("/")[4];
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", () => {
+      try {
+        const { status, result } = JSON.parse(body);
+        const cmd = updateCommand(cmdId, status, result);
+        if (!cmd) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Command not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: cmd.id, status: cmd.status }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  // ── Phase 31: Push notifications (Core → Android) ─────────────────────────
+  if (req.method === "POST" && req.url === "/v1/android/notify") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk.toString()));
+    req.on("end", async () => {
+      try {
+        const { deviceId, title, body: notifBody, data } = JSON.parse(body);
+        if (!title || !notifBody) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "title and body required" }));
+          return;
+        }
+        const payload: FcmPayload = { title, body: notifBody, data };
+        let result;
+        if (deviceId) {
+          result = await sendToDevice(deviceId, payload);
+        } else {
+          result = await sendToAll(payload);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+    return;
+  }
+
+  // ── Phase 31: Android polls for notifications ─────────────────────────────
+  if (req.method === "GET" && req.url === "/v1/android/notifications") {
+    const pending = getPendingNotifications();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(pending));
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/v1/android/notifications/read-all") {
+    const count = markAllRead();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, markedRead: count }));
+    return;
+  }
+
+  if (req.method === "POST" && req.url?.match(/^\/v1\/android\/notifications\/[^/]+\/read$/)) {
+    const notifId = req.url.split("/")[4];
+    const ok = markRead(notifId);
+    res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok }));
+    return;
+  }
+
+  // ── Phase 31: FCM status ──────────────────────────────────────────────────
+  if (req.method === "GET" && req.url === "/v1/android/fcm/status") {
+    const status = getFcmStatus();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(status));
+    return;
+  }
+
+  // ── Phase 31: Android status proxy ───────────────────────────────────────
+  if (req.method === "GET" && req.url === "/v1/android/status") {
+    http.get(CORE_URL + "/status/current", (up) => {
+      let d = "";
+      up.on("data", (c) => (d += c));
+      up.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(d);
+      });
+    }).on("error", (e) => {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    });
     return;
   }
 

@@ -9,8 +9,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class InboxActivity : AppCompatActivity() {
-    private val netUrl = "http://10.0.2.2:5052"
-    private val coreUrl = "http://10.0.2.2:5051"
+
+    private val netUrl  get() = ServerConfig.getNetUrl(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,11 +25,11 @@ class InboxActivity : AppCompatActivity() {
                 val msg = URL("$netUrl/envelope").readText()
                 runOnUiThread {
                     findViewById<TextView>(R.id.tvMessage).text =
-                        if (msg.isEmpty()) "No messages" else msg
+                        if (msg.isEmpty()) "אין הודעות" else msg
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    findViewById<TextView>(R.id.tvMessage).text = "Error: ${e.message}"
+                    findViewById<TextView>(R.id.tvMessage).text = "שגיאה: ${e.message}"
                 }
             }
         }.start()
@@ -48,14 +48,14 @@ class InboxActivity : AppCompatActivity() {
                 conn.disconnect()
                 runOnUiThread {
                     if (code == 200) {
-                        Toast.makeText(this@InboxActivity, "Reply sent", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@InboxActivity, "תשובה נשלחה", Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(this@InboxActivity, "Failed: $code", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@InboxActivity, "שגיאה: $code", Toast.LENGTH_SHORT).show()
                     }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(this@InboxActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@InboxActivity, "שגיאה: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()

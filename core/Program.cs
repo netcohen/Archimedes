@@ -107,6 +107,11 @@ var aptManager      = new AptManager();
 var osManager       = new OsManager(hardwareMonitor, aptManager, storageManager);
 osManager.Start();
 
+// Phase 31: Android Bridge — polls Net service for commands from Android app
+var androidBridgeHttp = httpClientFactory.CreateClient();
+var androidBridge     = new AndroidBridge(androidBridgeHttp, taskService, goalEngine, llmAdapter);
+androidBridge.Start();
+
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
 
@@ -883,7 +888,8 @@ app.MapGet("/status/current", () =>
                 isLinux        = OperatingSystem.IsLinux(),
                 rebootRequired = OsManager.IsRebootRequired(),
                 state          = osManager.GetStatus().State.ToString()
-            }
+            },
+            androidBridge = new { polling = true }
         });
     }
 
@@ -907,8 +913,33 @@ app.MapGet("/status/current", () =>
             isLinux        = OperatingSystem.IsLinux(),
             rebootRequired = OsManager.IsRebootRequired(),
             state          = osManager.GetStatus().State.ToString()
-        }
+        },
+        androidBridge = new { polling = true }
     });
+});
+
+// Phase 31: Core → Android notification relay
+app.MapPost("/android/notify", async (HttpRequest req) =>
+{
+    using var sr  = new StreamReader(req.Body);
+    var body      = await sr.ReadToEndAsync();
+    var json      = JsonDocument.Parse(body);
+    var title     = json.RootElement.TryGetProperty("title",    out var t) ? t.GetString() ?? "" : "";
+    var notifBody = json.RootElement.TryGetProperty("body",     out var b) ? b.GetString() ?? "" : "";
+
+    if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(notifBody))
+        return Results.BadRequest(new { error = "title and body are required" });
+
+    Dictionary<string, string>? data = null;
+    if (json.RootElement.TryGetProperty("data", out var dataEl))
+    {
+        data = new Dictionary<string, string>();
+        foreach (var prop in dataEl.EnumerateObject())
+            data[prop.Name] = prop.Value.GetString() ?? "";
+    }
+
+    await androidBridge.NotifyAsync(title, notifBody, data);
+    return Results.Json(new { ok = true, title });
 });
 
 // POST /chat/message — routes a user message through LLM → optionally creates a task
@@ -2387,6 +2418,7 @@ app.Lifetime.ApplicationStopping.Register(() =>
     goalRunner.Stop();
     selfImprovementEngine.Stop();
     osManager.Stop();
+    androidBridge.Stop();
 });
 app.Run();
 
