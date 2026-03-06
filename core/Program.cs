@@ -1203,7 +1203,7 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "RESPONSE: <your Hebrew reply>";
 
     // Phase 1: stream tokens
-    var sb  = new StringBuilder();
+    var sb  = new System.Text.StringBuilder();
     var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
     try
     {
