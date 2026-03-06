@@ -24,11 +24,8 @@ Environment=DOTNET_ENVIRONMENT=Production
 # Optional overrides (create this file with KEY=VALUE lines):
 EnvironmentFile=-/etc/archimedes/environment
 
-# Security hardening
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths=/opt/archimedes /var/log/archimedes /tmp
+# Note: security hardening directives intentionally omitted.
+# Archimedes requires full system access (sudo) to operate as an autonomous agent.
 
 [Install]
 WantedBy=multi-user.target
