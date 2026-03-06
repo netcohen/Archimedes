@@ -456,20 +456,24 @@ async function poll() {
     }
 
     // ── Tasks ──
-    const tasks = await api('/tasks');
+    const tasks = await api('/tasks/active');
     const tl = g('tasks-list');
     if (tl && Array.isArray(tasks)) {
-        tl.innerHTML = tasks.length === 0
-            ? '<div class="empty">No active tasks</div>'
-            : tasks.slice(0, 15).map(t => {
-                const st  = (t.status || t.Status || 'pending').toLowerCase();
-                const int = t.intent || t.Intent || t.id || t.Id || '—';
-                const at  = t.createdAt || t.CreatedAt || t.startedAt;
-                return `<div class="task ${st}">
-                    <div class="task-intent">${esc(int)}</div>
-                    <div class="task-meta">${esc(st)} · ${ago(at)}</div>
-                </div>`;
-            }).join('');
+        const STATE_HE = {
+            RUNNING: 'רץ', QUEUED: 'ממתין', PLANNING: 'מתכנן',
+            WAITING_APPROVAL: 'ממתין לאישור', PAUSED: 'מושהה',
+            DONE: 'הושלם', FAILED: 'נכשל'
+        };
+        tl.innerHTML = tasks.slice(0, 15).map(t => {
+            const st  = (t.state || t.State || 'running').toUpperCase();
+            const lbl = STATE_HE[st] || st;
+            const ttl = t.title || t.Title || t.taskId || '—';
+            const at  = t.createdAtUtc || t.CreatedAtUtc || t.updatedAtUtc;
+            return `<div class="task ${st.toLowerCase()}">
+                <div class="task-intent">${esc(ttl)}</div>
+                <div class="task-meta">${esc(lbl)} · ${ago(at)}</div>
+            </div>`;
+        }).join('');
     }
 
     // ── Goals ──

@@ -529,13 +529,15 @@ public static class ChatHtml
           }
 
           const STATE_LABEL = {
-            Running: 'רץ', Pending: 'ממתין',
-            Completed: 'הושלם', Failed: 'נכשל',
-            Paused: 'מושהה', Cancelled: 'בוטל'
+            RUNNING: 'רץ', QUEUED: 'ממתין', PLANNING: 'מתכנן',
+            WAITING_APPROVAL: 'ממתין לאישור', WAITING_SECRET: 'ממתין לסוד',
+            WAITING_CAPTCHA: 'ממתין לקפצ׳ה',
+            DONE: 'הושלם', FAILED: 'נכשל', PAUSED: 'מושהה'
           };
           const STATE_CSS = {
-            Running: 's-running', Pending: 's-pending',
-            Completed: 's-completed', Failed: 's-failed'
+            RUNNING: 's-running', QUEUED: 's-pending', PLANNING: 's-pending',
+            WAITING_APPROVAL: 's-pending', WAITING_SECRET: 's-pending',
+            DONE: 's-completed', FAILED: 's-failed', PAUSED: 's-other'
           };
 
           // ── Polling: metrics ─────────────────────────────────────────────
@@ -560,23 +562,17 @@ public static class ChatHtml
           // ── Polling: tasks ───────────────────────────────────────────────
           async function pollTasks() {
             try {
-              const r = await fetch('/tasks');
+              const r = await fetch('/tasks/active');
               if (!r.ok) return;
-              const all    = await r.json();
-              const active = all.filter(t => t.state === 'Running' || t.state === 'Pending');
+              const active = await r.json();
               const list   = document.getElementById('tasks-list');
 
-              if (active.length === 0) {
-                list.innerHTML = '<div id="no-tasks" style="color:#484f58;font-size:.8rem;text-align:center;padding:24px 8px">אין משימות פעילות</div>';
-                return;
-              }
-
               list.innerHTML = active.map(t => {
-                const css   = STATE_CSS[t.state]  || 's-other';
-                const label = STATE_LABEL[t.state] || t.state;
+                const st    = (t.state || t.State || 'RUNNING').toUpperCase();
+                const css   = STATE_CSS[st]  || 's-other';
+                const label = STATE_LABEL[st] || st;
                 return `
                   <div class="task-item">
-                    <div class="t-id">${esc(t.taskId)}</div>
                     <div class="t-title">${esc(t.title || t.taskId)}</div>
                     <span class="t-state ${css}">${label}</span>
                   </div>`;

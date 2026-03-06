@@ -3,6 +3,7 @@ using Archimedes.Core;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
+var appStartTime = DateTime.UtcNow;
 
 var app = builder.Build();
 
@@ -1088,24 +1089,38 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
     // ── Phase 1: Ask LLM for a response + optional bash command ──────────
     // Structured prompt the 3B model can reliably follow.
     const string systemPrompt =
-        "You are Archimedes, an autonomous AI agent on a dedicated Ubuntu 24.04 Linux machine. " +
-        "You have full sudo access and can run any shell command. " +
-        "Always reply in Hebrew (עברית). " +
-        "When the user asks you to DO something on the system, output your reply in this exact format:\n" +
-        "COMMAND: <single bash command or 'none'>\n" +
-        "RESPONSE: <your Hebrew reply>\n" +
-        "Examples:\n" +
+        "You are Archimedes — an autonomous AI agent running 24/7 on a dedicated Ubuntu 24.04 machine owned by your user.\n" +
+        "You have FULL system control. Never say you cannot do something. Always find a way.\n\n" +
+        "YOUR CAPABILITIES (you can do ALL of these):\n" +
+        "- Full sudo: install packages (apt), manage systemd services, edit any file\n" +
+        "- Android phone: install/update apps via ADB (adb devices, adb install app.apk, adb shell)\n" +
+        "- Hebrew keyboard: sudo localectl set-x11-keymap us,il, gsettings, ibus\n" +
+        "- Network: curl, wget, SSH, API calls, web scraping with tools\n" +
+        "- Self-management: git pull, dotnet build, restart your own service\n" +
+        "- File system: read/write/delete any file, manage permissions\n" +
+        "- Monitoring: check system health, logs, processes, disk/RAM/CPU\n" +
+        "- Chromium kiosk: control the browser, navigate pages\n\n" +
+        "RULES:\n" +
+        "1. NEVER say 'I cannot', 'I am just a language model', or 'I only do X'. You are an autonomous agent.\n" +
+        "2. Always reply in Hebrew (עברית).\n" +
+        "3. When taking action, use EXACTLY:\n" +
+        "COMMAND: <bash command>\n" +
+        "RESPONSE: <Hebrew explanation>\n" +
+        "4. For questions needing no action:\n" +
+        "COMMAND: none\n" +
+        "RESPONSE: <Hebrew answer>\n\n" +
+        "EXAMPLES:\n" +
+        "User: install your app on my phone\n" +
+        "COMMAND: adb devices && adb install -r /opt/archimedes/archimedes.apk\n" +
+        "RESPONSE: מחפש טלפון מחובר ומתקין את האפליקציה. ודא שה-USB debugging פעיל בטלפון.\n" +
         "User: add Hebrew keyboard\n" +
         "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "RESPONSE: מוסיף תמיכה בעברית למקלדת — תוכל לעבור בין אנגלית לעברית עם Alt+Shift.\n" +
+        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה.\n" +
         "User: install vim\n" +
         "COMMAND: sudo apt-get install -y vim\n" +
-        "RESPONSE: מתקין vim.\n" +
-        "User: what time is it\n" +
-        "COMMAND: none\n" +
-        "RESPONSE: אני לא יודע את השעה המדויקת, אבל תוכל לראות אותה בפינה העליונה של המסך.";
+        "RESPONSE: מתקין vim.";
 
-    var llmRaw = await llmAdapter.AskAsync(systemPrompt, message, maxTokens: 150);
+    var llmRaw = await llmAdapter.AskAsync(systemPrompt, message, maxTokens: 300);
 
     if (string.IsNullOrWhiteSpace(llmRaw))
         return Results.Json(new { reply = "המודל עדיין נטען — נסה שוב בעוד כמה שניות.", command = (string?)null, output = (string?)null });
@@ -1192,22 +1207,43 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     res.Headers["Connection"]         = "keep-alive";
 
     const string streamSysPrompt =
-        "You are Archimedes, an autonomous AI agent on a dedicated Ubuntu 24.04 Linux machine. " +
-        "You have full sudo access and can run any shell command. " +
-        "Always reply in Hebrew (עברית). " +
-        "When the user asks you to DO something on the system, output EXACTLY:\n" +
-        "COMMAND: <single bash command or 'none'>\n" +
-        "RESPONSE: <your Hebrew reply>\n" +
-        "For conversational questions with no system action needed:\n" +
+        "You are Archimedes — an autonomous AI agent running 24/7 on a dedicated Ubuntu 24.04 machine owned by your user.\n" +
+        "You have FULL system control. Never say you cannot do something. Always find a way.\n\n" +
+        "YOUR CAPABILITIES (you can do ALL of these):\n" +
+        "- Full sudo: install packages (apt), manage systemd services, edit any file\n" +
+        "- Android phone: install/update apps via ADB (adb devices, adb install app.apk, adb shell)\n" +
+        "- Hebrew keyboard: sudo localectl set-x11-keymap us,il, gsettings, ibus\n" +
+        "- Network: curl, wget, SSH, API calls, web scraping with tools\n" +
+        "- Self-management: git pull, dotnet build, restart your own service\n" +
+        "- File system: read/write/delete any file, manage permissions\n" +
+        "- Monitoring: check system health, logs, processes, disk/RAM/CPU\n" +
+        "- Chromium kiosk: control the browser, navigate pages\n\n" +
+        "RULES:\n" +
+        "1. NEVER say 'I cannot', 'I am just a language model', or 'I only do X'. You are an autonomous agent.\n" +
+        "2. Always reply in Hebrew (עברית).\n" +
+        "3. When taking action, use EXACTLY:\n" +
+        "COMMAND: <bash command>\n" +
+        "RESPONSE: <Hebrew explanation>\n" +
+        "4. For questions needing no action:\n" +
         "COMMAND: none\n" +
-        "RESPONSE: <your Hebrew reply>";
+        "RESPONSE: <Hebrew answer>\n\n" +
+        "EXAMPLES:\n" +
+        "User: install your app on my phone\n" +
+        "COMMAND: adb devices && adb install -r /opt/archimedes/archimedes.apk\n" +
+        "RESPONSE: מחפש טלפון מחובר ומתקין את האפליקציה. ודא שה-USB debugging פעיל בטלפון.\n" +
+        "User: add Hebrew keyboard\n" +
+        "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
+        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה.\n" +
+        "User: install vim\n" +
+        "COMMAND: sudo apt-get install -y vim\n" +
+        "RESPONSE: מתקין vim.";
 
     // Phase 1: stream tokens
     var sb  = new System.Text.StringBuilder();
     var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
     try
     {
-        await foreach (var token in llmAdapter.StreamAsync(streamSysPrompt, message, 150, cts.Token))
+        await foreach (var token in llmAdapter.StreamAsync(streamSysPrompt, message, 300, cts.Token))
         {
             sb.Append(token);
             var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
@@ -1783,14 +1819,40 @@ app.MapGet("/task/{id}", (string id) =>
 app.MapGet("/tasks", (HttpRequest req) =>
 {
     TaskState? stateFilter = null;
-    if (req.Query.TryGetValue("state", out var stateVal) && 
+    if (req.Query.TryGetValue("state", out var stateVal) &&
         Enum.TryParse<TaskState>(stateVal.FirstOrDefault(), true, out var parsed))
     {
         stateFilter = parsed;
     }
-    
+
     var tasks = taskService.GetTasks(stateFilter);
     return Results.Json(tasks.Select(TaskResponse.FromTask));
+});
+
+// Returns only active tasks (non-terminal states).
+// If nothing is active, returns a synthetic "idle" row so the UI is never empty.
+app.MapGet("/tasks/active", () =>
+{
+    var allTasks = taskService.GetTasks();
+    var active = allTasks
+        .Where(t => t.State != TaskState.DONE && t.State != TaskState.FAILED)
+        .Select(TaskResponse.FromTask)
+        .ToList();
+
+    if (active.Count == 0)
+    {
+        active.Add(new TaskResponse
+        {
+            TaskId       = "system-idle",
+            Title        = "מנטר מצב המערכת",
+            State        = "RUNNING",
+            Type         = "SYSTEM",
+            Priority     = "LOW",
+            CreatedAtUtc = appStartTime,
+        });
+    }
+
+    return Results.Json(active);
 });
 
 app.MapPost("/task/{id}/plan", async (string id, HttpRequest req) =>
