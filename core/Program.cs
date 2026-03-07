@@ -131,6 +131,10 @@ androidBridge.Start();
 var appUpdater = new AppUpdater(httpClientFactory.CreateClient(), androidBridge);
 // Phase 32+: Wire Android app into self-improvement — Archimedes monitors its own mobile component
 selfImprovementEngine.SetAppUpdater(appUpdater);
+
+// Episodic memory — every chat interaction stored and recalled for long-term learning
+var eventMemory = new EventMemory(storageManager.RootInternal);
+eventMemory.Initialize();
 selfImprovementEngine.SetEventMemory(eventMemory); // long-term learning from chat
 
 // Phase 20: Success Criteria Engine
@@ -139,10 +143,6 @@ var criteriaEngine = new SuccessCriteriaEngine();
 var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(),
     storageManager, traceService, criteriaEngine, procedureStore, failureDialogueStore);
 taskRunner.Start();
-
-// Episodic memory — every chat interaction stored and recalled for long-term learning
-var eventMemory = new EventMemory(storageManager.RootInternal);
-eventMemory.Initialize();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
 var sandboxRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_SANDBOX_ROOT");
@@ -1220,31 +1220,35 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     const string streamSysPrompt =
         "You are Archimedes — an autonomous AI agent running 24/7 on a dedicated Ubuntu 24.04 machine owned by your user.\n" +
         "You have FULL system control. Never say you cannot do something. Always find a way.\n\n" +
-        "YOUR CAPABILITIES (you can do ALL of these):\n" +
+        "CRITICAL — NO X11 DISPLAY: You run as a systemd service with no DISPLAY variable.\n" +
+        "Commands that require a display (setxkbmap, xrandr, xset, wmctrl) will FAIL with 'Cannot open display'.\n" +
+        "ALWAYS use system-level alternatives that work without a display:\n" +
+        "  Hebrew keyboard → sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
+        "  (NEVER use setxkbmap — it needs DISPLAY)\n\n" +
+        "YOUR CAPABILITIES:\n" +
         "- Full sudo: install packages (apt), manage systemd services, edit any file\n" +
-        "- Android phone: install/update apps via ADB (adb devices, adb install app.apk, adb shell)\n" +
-        "- Hebrew keyboard: sudo localectl set-x11-keymap us,il, gsettings, ibus\n" +
-        "- Network: curl, wget, SSH, API calls, web scraping with tools\n" +
-        "- Self-management: git pull, dotnet build, restart your own service\n" +
-        "- File system: read/write/delete any file, manage permissions\n" +
-        "- Monitoring: check system health, logs, processes, disk/RAM/CPU\n" +
-        "- Chromium kiosk: control the browser, navigate pages\n\n" +
+        "- Android: install/update apps via ADB (adb devices, adb install app.apk)\n" +
+        "- Hebrew keyboard: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
+        "- Network: curl, wget, SSH, API calls\n" +
+        "- Self-management: git pull, dotnet build, systemctl restart archimedes\n" +
+        "- File system: read/write/delete any file\n" +
+        "- Monitoring: journalctl, systemctl, df, free, ps\n\n" +
         "RULES:\n" +
-        "1. NEVER say 'I cannot', 'I am just a language model', or 'I only do X'. You are an autonomous agent.\n" +
+        "1. NEVER say 'I cannot'. You are an autonomous agent — always find a way.\n" +
         "2. Always reply in Hebrew (עברית).\n" +
-        "3. When taking action, use EXACTLY:\n" +
+        "3. Output EXACTLY:\n" +
         "COMMAND: <bash command>\n" +
         "RESPONSE: <Hebrew explanation>\n" +
-        "4. For questions needing no action:\n" +
+        "4. No action needed:\n" +
         "COMMAND: none\n" +
         "RESPONSE: <Hebrew answer>\n\n" +
         "EXAMPLES:\n" +
-        "User: install your app on my phone\n" +
-        "COMMAND: adb devices && adb install -r /opt/archimedes/archimedes.apk\n" +
-        "RESPONSE: מחפש טלפון מחובר ומתקין את האפליקציה. ודא שה-USB debugging פעיל בטלפון.\n" +
         "User: add Hebrew keyboard\n" +
         "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה.\n" +
+        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה. ייכנס לתוקף בהתחברות הבאה.\n" +
+        "User: install your app on my phone\n" +
+        "COMMAND: adb devices && adb install -r $(find /opt/archimedes /home -name '*.apk' 2>/dev/null | head -1)\n" +
+        "RESPONSE: מחפש טלפון מחובר ומתקין. ודא USB debugging פעיל בטלפון.\n" +
         "User: install vim\n" +
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";
@@ -1307,31 +1311,144 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         }
     }
 
-    // Phase 3: execute command if present
+    // Phase 3: execute command — with automatic retry loop (up to 2 attempts).
+    // On failure: stream a "retry" SSE event → ask LLM for alternative → execute.
+    // This is how Archimedes learns to recover from errors instead of just reporting them.
     string? cmdOut = null;
+    bool    cmdOk  = true;
+
     if (!string.IsNullOrEmpty(bashCmd))
     {
-        ArchLogger.LogInfo($"[Chat/Stream] Executing: {bashCmd}");
-        try
+        const int MAX_CMD_RETRIES = 2;
+        string    currentCmd      = bashCmd;
+
+        for (int attempt = 1; attempt <= MAX_CMD_RETRIES; attempt++)
         {
-            var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", bashCmd })
+            ArchLogger.LogInfo($"[Chat/Stream] Executing (attempt {attempt}/{MAX_CMD_RETRIES}): {currentCmd}");
+            int exitCode = -1;
+
+            try
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false
-            };
-            using var proc = System.Diagnostics.Process.Start(psi)!;
-            var outSb = new System.Text.StringBuilder();
-            proc.OutputDataReceived += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            using var cmdCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            await proc.WaitForExitAsync(cmdCts.Token);
-            cmdOut = outSb.ToString().Trim();
-            if (proc.ExitCode != 0) reply += $"\n⚠ הפקודה הסתיימה עם שגיאה (קוד {proc.ExitCode}).";
+                var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", currentCmd })
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
+                    UseShellExecute        = false
+                };
+                using var proc = System.Diagnostics.Process.Start(psi)!;
+                var outSb = new System.Text.StringBuilder();
+                proc.OutputDataReceived += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
+                proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                using var cmdCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                await proc.WaitForExitAsync(cmdCts.Token);
+                cmdOut   = outSb.ToString().Trim();
+                exitCode = proc.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                cmdOut   = "שגיאה: " + ex.Message;
+                exitCode = -1;
+                cmdOk    = false;
+                ArchLogger.LogWarn($"[Chat/Stream] Execute exception: {ex.Message}");
+                break;
+            }
+
+            if (exitCode == 0)
+            {
+                cmdOk   = true;
+                bashCmd = currentCmd;   // report the command that actually succeeded
+                ArchLogger.LogInfo($"[Chat/Stream] Command succeeded on attempt {attempt}");
+                break;
+            }
+
+            // ── Command failed ─────────────────────────────────────────────────
+            cmdOk = false;
+            ArchLogger.LogWarn($"[Chat/Stream] Cmd failed exit={exitCode} attempt={attempt}: {currentCmd}");
+
+            if (attempt == MAX_CMD_RETRIES)
+            {
+                reply += $"\n⚠ הפקודה נכשלה לאחר {MAX_CMD_RETRIES} ניסיונות (קוד {exitCode}).";
+                break;
+            }
+
+            // ── Notify client we are retrying ──────────────────────────────────
+            var retryEvt = JsonSerializer.Serialize(new
+            {
+                type    = "retry",
+                attempt,
+                msg     = $"שגיאה בניסיון {attempt} — מנסה גישה אחרת..."
+            });
+            await res.WriteAsync($"data: {retryEvt}\n\n");
+            await res.Body.FlushAsync();
+
+            // ── Ask LLM for an alternative approach ───────────────────────────
+            var errorCtx =
+                "PREVIOUS COMMAND FAILED:\n" +
+                $"Command:   {currentCmd}\n" +
+                $"Exit code: {exitCode}\n" +
+                $"Error output: {cmdOut?[..Math.Min(400, cmdOut?.Length ?? 0)]}\n\n" +
+                $"Original user request: {message}\n\n" +
+                "Provide an ALTERNATIVE command that avoids this error.\n" +
+                "Use this EXACT format:\n" +
+                "COMMAND: <alternative bash command>\n" +
+                "RESPONSE: <Hebrew explanation of the new approach>";
+
+            var altSb       = new System.Text.StringBuilder();
+            var altCts      = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            bool llmRetryOk = true;
+            try
+            {
+                await foreach (var tok in llmAdapter.StreamAsync(
+                    streamSysPrompt, errorCtx, 250, altCts.Token))
+                {
+                    altSb.Append(tok);
+                    // Stream retry tokens so the user sees progress in the chat box
+                    var rtJson = JsonSerializer.Serialize(new { type = "retry_token", token = tok });
+                    await res.WriteAsync($"data: {rtJson}\n\n");
+                    await res.Body.FlushAsync();
+                }
+            }
+            catch (Exception ex2)
+            {
+                ArchLogger.LogWarn($"[Chat/Stream] Retry LLM call failed: {ex2.Message}");
+                reply     += "\n⚠ הפקודה נכשלה ולא הצלחתי לקבל גישה חלופית מה-LLM.";
+                llmRetryOk = false;
+            }
+            finally { altCts.Dispose(); }
+
+            if (!llmRetryOk) break;
+
+            // ── Parse alternative command from LLM ────────────────────────────
+            string? altCmd   = null;
+            string  altReply = reply;
+            foreach (var ln in altSb.ToString().Trim()
+                         .Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (ln.StartsWith("COMMAND:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var c = ln["COMMAND:".Length..].Trim();
+                    if (!string.IsNullOrEmpty(c) &&
+                        !c.Equals("none", StringComparison.OrdinalIgnoreCase))
+                        altCmd = c;
+                }
+                else if (ln.StartsWith("RESPONSE:", StringComparison.OrdinalIgnoreCase))
+                    altReply = ln["RESPONSE:".Length..].Trim();
+            }
+
+            if (string.IsNullOrEmpty(altCmd))
+            {
+                reply += "\n⚠ הפקודה נכשלה ולא נמצאה גישה חלופית.";
+                break;
+            }
+
+            // ── Prepare next iteration ────────────────────────────────────────
+            currentCmd = altCmd;
+            bashCmd    = altCmd;    // update so Phase 4 reports the final command
+            reply      = altReply;
+            ArchLogger.LogInfo($"[Chat/Stream] Retrying with alternative: {altCmd}");
         }
-        catch (Exception ex) { cmdOut = "שגיאה: " + ex.Message; }
     }
 
     // Phase 4: send done event with parsed data
@@ -1361,13 +1478,14 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     }
 
     // Save to episodic memory (long-term learning)
+    // cmdOk = true when no command ran OR the command exited 0 (possibly after retries)
     _ = Task.Run(() => eventMemory.Save(new MemoryEvent
     {
         UserMessage = message,
         Command     = bashCmd ?? "none",
         Reply       = reply,
         Output      = cmdOut ?? "",
-        Success     = bashCmd == null || !reply.Contains("⚠")
+        Success     = bashCmd == null || cmdOk
     }));
 });
 

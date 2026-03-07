@@ -566,8 +566,9 @@ async function sendChat() {
     chatIn.disabled  = true;
     chatBtn.disabled = true;
 
-    // Streaming bot bubble — tokens appear here as they arrive
-    const botEl = document.createElement('div');
+    // Streaming bot bubble — tokens appear here as they arrive.
+    // Declared with `let` so we can swap it to a fresh bubble on retry.
+    let botEl = document.createElement('div');
     botEl.className = 'cm bot';
     botEl.textContent = '▍';   // blinking cursor before first token
     chatMsgs.appendChild(botEl);
@@ -605,6 +606,30 @@ async function sendChat() {
                 if (evt.type === 'token') {
                     streamText += evt.token;
                     // Show only RESPONSE: part if present, else raw stream
+                    const display = extractResponse(streamText);
+                    botEl.textContent = display + '▍';
+                    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+
+                } else if (evt.type === 'retry') {
+                    // First attempt failed — freeze the current bubble as a warning,
+                    // then open a fresh bubble for the LLM's alternative approach.
+                    if (botEl.textContent.endsWith('▍'))
+                        botEl.textContent = botEl.textContent.slice(0, -1);
+                    botEl.className = 'cm warn';
+                    // Status line explaining what happened
+                    chatLine('⟳ ' + (evt.msg || 'שגיאה — מנסה גישה אחרת...'), 'dim');
+                    // New bubble for retry LLM tokens
+                    const retryEl = document.createElement('div');
+                    retryEl.className = 'cm bot';
+                    retryEl.textContent = '▍';
+                    chatMsgs.appendChild(retryEl);
+                    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+                    botEl      = retryEl;   // reroute all future updates here
+                    streamText = '';
+
+                } else if (evt.type === 'retry_token') {
+                    // LLM thinking about alternative — treat exactly like a token
+                    streamText += evt.token;
                     const display = extractResponse(streamText);
                     botEl.textContent = display + '▍';
                     chatMsgs.scrollTop = chatMsgs.scrollHeight;
