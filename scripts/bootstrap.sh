@@ -108,6 +108,23 @@ fi
 ok "Internet connectivity confirmed"
 
 # =============================================================================
+#  STEP 0.4 — SSH remote access (allows dashboard + log monitoring remotely)
+# =============================================================================
+
+section "Step 0.4 — Enabling SSH remote access"
+
+sudo apt-get install -y openssh-server 2>&1 | grep -E 'installed|already'
+sudo systemctl enable ssh
+sudo systemctl start  ssh
+
+# Print connection instructions once setup is done
+HOST_IP=$(hostname -I | awk '{print $1}')
+ok "SSH enabled — connect from your PC:"
+ok "  ssh arcimedes@${HOST_IP}"
+ok "  Then open: http://localhost:5051/dashboard (after SSH tunnel)"
+ok "  Tunnel cmd: ssh -L 5051:localhost:5051 arcimedes@${HOST_IP}"
+
+# =============================================================================
 #  STEP 0.5 — Disable system sleep / suspend (Phase 37)
 # =============================================================================
 

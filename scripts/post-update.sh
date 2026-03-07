@@ -33,6 +33,22 @@ echo "Changed files:"
 echo "$CHANGED" | sed 's/^/  /'
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  0. SSH CHECK — ensure remote access is always available
+# ═══════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- SSH check ---"
+
+if ! systemctl is-active --quiet ssh 2>/dev/null; then
+    echo "  → SSH not running — starting..."
+    sudo apt-get install -y openssh-server -qq 2>/dev/null
+    sudo systemctl enable ssh
+    sudo systemctl start  ssh
+    echo "  → SSH started"
+else
+    echo "  → SSH OK ($(hostname -I | awk '{print $1}'))"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  1. OLLAMA CHECK — ensure Ollama is installed and model is pulled
 # ═══════════════════════════════════════════════════════════════════════════
 echo ""
