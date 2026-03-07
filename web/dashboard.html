@@ -582,7 +582,7 @@ async function sendChat() {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ message: msg }),
-            signal:  AbortSignal.timeout(100000)
+            signal:  AbortSignal.timeout(150000)  // 150s — matches 120s server + 30s slack
         });
         if (!r.ok) throw new Error('HTTP ' + r.status);
 

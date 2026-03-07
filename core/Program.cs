@@ -359,7 +359,7 @@ app.MapPost("/job/{id}/run-slow", (string id) =>
 // Keeps the last MAX_HISTORY exchanges so Archimedes remembers context within
 // a session. Each entry is (role, content) where role = "user" | "assistant".
 var chatHistory    = new List<(string Role, string Content)>();
-const int MAX_HISTORY_TURNS = 10; // 10 user + 10 assistant = 20 messages max
+const int MAX_HISTORY_TURNS = 4;  // 4 user + 4 assistant = 8 messages — keeps context lean
 
 var monitorTickCount = 0;
 var monitorCts = new CancellationTokenSource();
@@ -1253,8 +1253,9 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";
 
-    // Recall relevant past events → inject into system prompt
-    var pastEvents   = eventMemory.Recall(message, limit: 4);
+    // Recall relevant past events → inject into system prompt.
+    // Limit to 2 events to keep context lean (each event adds ~50 tokens).
+    var pastEvents   = eventMemory.Recall(message, limit: 2);
     var memoryBlock  = EventMemory.FormatForPrompt(pastEvents);
     var fullSysPrompt = string.IsNullOrEmpty(memoryBlock)
         ? streamSysPrompt
@@ -1265,11 +1266,11 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     lock (chatHistory) { historySnapshot = chatHistory.ToList(); }
 
     var sb  = new System.Text.StringBuilder();
-    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); // 2-minute ceiling
     try
     {
         await foreach (var token in llmAdapter.StreamAsync(
-            fullSysPrompt, message, 300, cts.Token, historySnapshot))
+            fullSysPrompt, message, 200, cts.Token, historySnapshot))
         {
             sb.Append(token);
             var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
@@ -1462,11 +1463,12 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     await res.WriteAsync($"data: {doneJson}\n\n");
     await res.Body.FlushAsync();
 
-    // Save this exchange to conversation history (short-term memory)
+    // Save this exchange to conversation history (short-term memory).
+    // Keep OUTPUT short in history — long outputs inflate context and slow the model.
     var assistantContent = string.IsNullOrEmpty(bashCmd)
         ? $"COMMAND: none\nRESPONSE: {reply}"
         : $"COMMAND: {bashCmd}\nRESPONSE: {reply}"
-          + (string.IsNullOrEmpty(cmdOut) ? "" : $"\nOUTPUT: {cmdOut[..Math.Min(300, cmdOut.Length)]}");
+          + (string.IsNullOrEmpty(cmdOut) ? "" : $"\nOUTPUT: {cmdOut[..Math.Min(80, cmdOut.Length)]}");
 
     lock (chatHistory)
     {
