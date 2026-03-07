@@ -65,11 +65,11 @@ echo "--- Kiosk script check ---"
 KIOSK_SCRIPT="/usr/local/bin/archimedes-kiosk"
 CORE_PORT=$(grep "^ARCHIMEDES_PORT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "5051")
 
-# Write the latest version of the kiosk launcher (v3) to a temp file
-# v3: singleton lock, fresh profile, pkill stale, xdpyinfo wait, resolution detect
+# Write the latest version of the kiosk launcher (v4) to a temp file
+# v4: gnome-shell wait + settle time (fixes window-mode-after-reboot bug)
 cat > /tmp/archimedes-kiosk-new << 'KIOSKEOF'
 #!/bin/bash
-# Archimedes Kiosk Launcher v3
+# Archimedes Kiosk Launcher v4
 
 # ── Singleton lock — only one kiosk instance allowed ──────────────────
 LOCK_FILE="/tmp/archimedes-kiosk.lock"
@@ -86,11 +86,21 @@ mkdir -p "$KIOSK_PROFILE"
 pkill -f chromium 2>/dev/null || true
 sleep 1
 
-# ── Wait for DISPLAY to be available (up to 30s) ──────────────────────
+# ── Wait for DISPLAY (X11 server) ─────────────────────────────────────
 for i in $(seq 1 30); do
     xdpyinfo >/dev/null 2>&1 && break
     sleep 1
 done
+
+# ── Wait for GNOME Shell (window manager) — xdpyinfo is not enough ────
+# Without this wait, Chromium opens BEFORE GNOME WM is ready and stays
+# in window mode instead of going fullscreen.
+for i in $(seq 1 40); do
+    pgrep -x gnome-shell >/dev/null 2>&1 && break
+    sleep 1
+done
+# Give GNOME Shell additional time to finish compositing setup
+sleep 5
 
 # ── Disable X11 DPMS / blanking ───────────────────────────────────────
 xset -dpms   2>/dev/null || true

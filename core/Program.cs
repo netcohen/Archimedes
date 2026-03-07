@@ -1239,16 +1239,18 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "3. Output EXACTLY:\n" +
         "COMMAND: <bash command>\n" +
         "RESPONSE: <Hebrew explanation>\n" +
-        "4. No action needed:\n" +
-        "COMMAND: none\n" +
-        "RESPONSE: <Hebrew answer>\n\n" +
+        "4. No action needed → COMMAND: none\n" +
+        "5. RESTART RULES (critical):\n" +
+        "   'restart' / 'reboot' / 'הפעל מחדש' / 'אתחל' → COMMAND: sudo reboot\n" +
+        "   NEVER use 'systemctl restart archimedes' for a user restart request.\n" +
+        "   'restart only the service' → COMMAND: sudo systemctl restart archimedes\n\n" +
         "EXAMPLES:\n" +
+        "User: תעשה הפעלה מחדש\n" +
+        "COMMAND: sudo reboot\n" +
+        "RESPONSE: מאתחל את המחשב. יחזור בעוד כדקה.\n" +
         "User: add Hebrew keyboard\n" +
         "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה. ייכנס לתוקף בהתחברות הבאה.\n" +
-        "User: install your app on my phone\n" +
-        "COMMAND: adb devices && adb install -r $(find /opt/archimedes /home -name '*.apk' 2>/dev/null | head -1)\n" +
-        "RESPONSE: מחפש טלפון מחובר ומתקין. ודא USB debugging פעיל בטלפון.\n" +
+        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה.\n" +
         "User: install vim\n" +
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";

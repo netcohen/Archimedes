@@ -31,8 +31,8 @@ ok "Kiosk profile cleared"
 info "Writing updated kiosk launcher..."
 sudo tee /usr/local/bin/archimedes-kiosk > /dev/null << 'KIOSKEOF'
 #!/bin/bash
-# Archimedes Kiosk Launcher v3
-# Fixes: race condition, duplicate instances, windowed fallback
+# Archimedes Kiosk Launcher v4
+# Fixes: race condition, duplicate instances, windowed fallback, gnome-shell timing
 
 # ── Singleton lock — only one kiosk instance allowed ──────────────────
 LOCK_FILE="/tmp/archimedes-kiosk.lock"
@@ -49,11 +49,21 @@ mkdir -p "$KIOSK_PROFILE"
 pkill -f chromium 2>/dev/null || true
 sleep 1
 
-# ── Wait for DISPLAY to be available (up to 30s) ──────────────────────
+# ── Wait for DISPLAY (X11 server) ─────────────────────────────────────
 for i in $(seq 1 30); do
     xdpyinfo >/dev/null 2>&1 && break
     sleep 1
 done
+
+# ── Wait for GNOME Shell (window manager) — xdpyinfo is not enough ────
+# Without this wait, Chromium opens BEFORE GNOME WM is ready and stays
+# in window mode instead of going fullscreen.
+for i in $(seq 1 40); do
+    pgrep -x gnome-shell >/dev/null 2>&1 && break
+    sleep 1
+done
+# Give GNOME Shell additional time to finish compositing setup
+sleep 5
 
 # ── Disable X11 DPMS / blanking ───────────────────────────────────────
 xset -dpms   2>/dev/null || true
