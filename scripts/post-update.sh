@@ -65,25 +65,53 @@ echo "--- Kiosk script check ---"
 KIOSK_SCRIPT="/usr/local/bin/archimedes-kiosk"
 CORE_PORT=$(grep "^ARCHIMEDES_PORT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "5051")
 
-# Write the latest version of the kiosk launcher to a temp file
+# Write the latest version of the kiosk launcher (v3) to a temp file
+# v3: singleton lock, fresh profile, pkill stale, xdpyinfo wait, resolution detect
 cat > /tmp/archimedes-kiosk-new << 'KIOSKEOF'
 #!/bin/bash
-# Archimedes Kiosk Launcher v2
+# Archimedes Kiosk Launcher v3
 
+# ── Singleton lock — only one kiosk instance allowed ──────────────────
+LOCK_FILE="/tmp/archimedes-kiosk.lock"
+exec 200>"$LOCK_FILE"
+flock -n 200 || { echo "[kiosk] already running — exiting"; exit 0; }
+trap "flock -u 200; rm -f $LOCK_FILE" EXIT
+
+# ── Clean profile on every start (no crash/session state) ─────────────
+KIOSK_PROFILE="/tmp/archimedes-kiosk-profile"
+rm -rf "$KIOSK_PROFILE"
+mkdir -p "$KIOSK_PROFILE"
+
+# ── Kill any stale Chromium from previous session ─────────────────────
+pkill -f chromium 2>/dev/null || true
+sleep 1
+
+# ── Wait for DISPLAY to be available (up to 30s) ──────────────────────
+for i in $(seq 1 30); do
+    xdpyinfo >/dev/null 2>&1 && break
+    sleep 1
+done
+
+# ── Disable X11 DPMS / blanking ───────────────────────────────────────
 xset -dpms   2>/dev/null || true
 xset s off   2>/dev/null || true
 xset s noblank 2>/dev/null || true
 
+# ── DBUS for snap confinement ─────────────────────────────────────────
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
+# ── Wait up to 90s for Archimedes Core ────────────────────────────────
 for i in $(seq 1 45); do
     curl -sf http://localhost:5051/health >/dev/null 2>&1 && break
     sleep 2
 done
 
-KIOSK_PROFILE="/tmp/archimedes-kiosk-profile"
-mkdir -p "$KIOSK_PROFILE"
+# ── Detect screen resolution ──────────────────────────────────────────
+RESOLUTION=$(xrandr 2>/dev/null | grep ' connected primary' | grep -oP '\d+x\d+' | head -1)
+[ -z "$RESOLUTION" ] && RESOLUTION="1920x1080"
+W=${RESOLUTION%x*}; H=${RESOLUTION#*x}
 
+# ── Restart loop ──────────────────────────────────────────────────────
 while true; do
     for PREF in \
         "$HOME/snap/chromium/current/.config/chromium/Default/Preferences" \
@@ -96,6 +124,9 @@ while true; do
 
     /snap/bin/chromium \
         --kiosk \
+        --start-fullscreen \
+        --window-position=0,0 \
+        --window-size=${W},${H} \
         --user-data-dir="$KIOSK_PROFILE" \
         --noerrdialogs \
         --disable-infobars \
@@ -114,13 +145,18 @@ while true; do
 done
 KIOSKEOF
 
-# Only update if content differs
+# Update if content differs, then restart kiosk immediately
 if ! diff -q /tmp/archimedes-kiosk-new "$KIOSK_SCRIPT" > /dev/null 2>&1; then
     sudo cp /tmp/archimedes-kiosk-new "$KIOSK_SCRIPT"
     sudo chmod +x "$KIOSK_SCRIPT"
-    echo "  → Kiosk script updated (takes effect on next kiosk restart)"
+    echo "  → Kiosk script updated to v3"
+    # Restart kiosk so new script takes effect immediately
+    pkill -f archimedes-kiosk 2>/dev/null || true
+    sleep 1
+    nohup /usr/local/bin/archimedes-kiosk > /tmp/kiosk.log 2>&1 &
+    echo "  → Kiosk restarted (PID $!)"
 else
-    echo "  → Kiosk script unchanged"
+    echo "  → Kiosk script unchanged (v3 already installed)"
 fi
 rm -f /tmp/archimedes-kiosk-new
 

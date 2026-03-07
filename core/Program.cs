@@ -1318,6 +1318,49 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     string? cmdOut = null;
     bool    cmdOk  = true;
 
+    // Detect commands that kill the server (reboot/shutdown/restart archimedes).
+    // These must send "done" FIRST — the server dies before it can respond otherwise.
+    static bool IsDisruptive(string? cmd) =>
+        cmd != null && System.Text.RegularExpressions.Regex.IsMatch(cmd,
+            @"\breboot\b|\bshutdown\b|\bpoweroff\b|\bhalt\b|systemctl\s+restart\s+archimedes");
+
+    if (!string.IsNullOrEmpty(bashCmd) && IsDisruptive(bashCmd))
+    {
+        // Send done BEFORE the command — client gets its response while server is still up
+        var earlyOut  = "מבצע... החיבור יינתק לרגע";
+        var earlyDone = JsonSerializer.Serialize(new
+            { type = "done", reply, command = bashCmd, output = earlyOut });
+        await res.WriteAsync($"data: {earlyDone}\n\n");
+        await res.Body.FlushAsync();
+
+        // Delay 800ms so the browser receives and renders the event, then execute
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(800);
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(
+                    "bash", new[] { "-c", bashCmd })
+                { UseShellExecute = false };
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                ArchLogger.LogWarn($"[Chat/Stream] Disruptive cmd failed: {ex.Message}");
+            }
+        });
+
+        _ = Task.Run(() => eventMemory.Save(new MemoryEvent
+        {
+            UserMessage = message,
+            Command     = bashCmd,
+            Reply       = reply,
+            Output      = earlyOut,
+            Success     = true
+        }));
+        return;
+    }
+
     if (!string.IsNullOrEmpty(bashCmd))
     {
         const int MAX_CMD_RETRIES = 2;
