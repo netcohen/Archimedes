@@ -38,7 +38,7 @@ echo "$CHANGED" | sed 's/^/  /'
 echo ""
 echo "--- Ollama check ---"
 
-OLLAMA_MODEL=$(grep "^ARCHIMEDES_OLLAMA_MODEL=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "llama3.1:8b")
+OLLAMA_MODEL=$(grep "^ARCHIMEDES_OLLAMA_MODEL=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "qwen2.5:7b")
 
 if ! command -v ollama &>/dev/null; then
     echo "  → Ollama not installed — running install-ollama.sh"

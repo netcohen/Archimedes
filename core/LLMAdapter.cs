@@ -49,7 +49,7 @@ public class LLMAdapter : IDisposable
         _ollamaBase = Environment.GetEnvironmentVariable("ARCHIMEDES_OLLAMA_URL")
             ?? "http://localhost:11434";
         _model = Environment.GetEnvironmentVariable("ARCHIMEDES_OLLAMA_MODEL")
-            ?? "llama3.1:8b";
+            ?? "qwen2.5:7b";
 
         // Timeout.InfiniteTimeSpan — each call uses its own CancellationTokenSource
         _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };

@@ -21,7 +21,7 @@ info() { echo -e "${CYAN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERR]${NC} $*" >&2; }
 
-OLLAMA_MODEL="${ARCHIMEDES_OLLAMA_MODEL:-llama3.1:8b}"
+OLLAMA_MODEL="${ARCHIMEDES_OLLAMA_MODEL:-qwen2.5:7b}"
 ENV_FILE="/etc/archimedes/environment"
 
 echo ""
