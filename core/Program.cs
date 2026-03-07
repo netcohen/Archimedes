@@ -31,7 +31,8 @@ var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
 var llmAdapter = new LLMAdapter();
-llmAdapter.WarmUp(); // pre-load model into memory so first user message is fast
+llmAdapter.WarmUp();          // pre-load model into memory so first user message is fast
+llmAdapter.StartKeepAlive(); // ping every 90s — prevents model unload between messages
 
 // Phase 21: Procedure Memory
 var procedureStore = new ProcedureStore();
@@ -998,7 +999,7 @@ app.MapGet("/android/update/status", () =>
 app.MapPost("/android/first-install", async () =>
 {
     var msg = await appUpdater.FirstInstallAsync();
-    return Results.Json(new { ok = !msg.StartsWith("שגיאה") && !msg.StartsWith("לא נמצא"), message = msg });
+    return Results.Text(msg); // plain text so Archimedes can read it directly via curl
 });
 
 // POST /chat/message — routes a user message through LLM → optionally creates a task
@@ -1228,32 +1229,18 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     res.Headers["Connection"]         = "keep-alive";
 
     // Kept intentionally SHORT — every extra token = slower response on low-end hardware.
-    // ~80 tokens vs the 600-token version that caused 2.5-min delays and Arabic replies.
     const string streamSysPrompt =
         "אתה ארכימדס — סוכן AI אוטונומי על Ubuntu 24.04 עם sudo מלא.\n" +
         "ענה תמיד בעברית. מונחים טכניים — אנגלית מותרת.\n" +
-        "פורמט חובה בכל תשובה:\n" +
-        "COMMAND: <פקודת bash, או none>\n" +
-        "RESPONSE: <תשובה בעברית>\n\n" +
-        "חוקים קריטיים:\n" +
-        "- הפעלה מחדש / restart / reboot → COMMAND: sudo reboot\n" +
-        "- מקלדת עברית → COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "  (אסור setxkbmap — אין DISPLAY בשירות)\n" +
-        "- IP ברשת המקומית → COMMAND: hostname -I | awk '{print $1}'\n" +
-        "  (hostname -i קטנה שגוי — תחזיר 127.0.1.1)\n" +
-        "- הפעלת SSH → COMMAND: sudo apt-get install -y openssh-server && sudo systemctl enable ssh && sudo systemctl start ssh\n" +
-        "- התקנת האפליקציה לטלפון → COMMAND: curl -sf -X POST http://localhost:5051/android/first-install | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['message'])\"\n" +
-        "- אף פעם אל תגיד 'אני לא יכול'\n\n" +
-        "דוגמאות:\n" +
-        "User: התקן vim\n" +
-        "COMMAND: sudo apt-get install -y vim\n" +
-        "RESPONSE: מתקין vim.\n" +
-        "User: הפעל מחדש\n" +
-        "COMMAND: sudo reboot\n" +
-        "RESPONSE: מאתחל. יחזור בעוד כדקה.\n" +
-        "User: מה ה-IP?\n" +
-        "COMMAND: hostname -I | awk '{print $1}'\n" +
-        "RESPONSE: בודק IP.";
+        "פורמט חובה:\nCOMMAND: <bash או none>\nRESPONSE: <עברית>\n\n" +
+        "כללים:\n" +
+        "- reboot/restart → sudo reboot\n" +
+        "- מקלדת עברית → sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
+        "- IP ברשת → hostname -I | awk '{print $1}'  (לא hostname -i)\n" +
+        "- SSH → sudo apt-get install -y openssh-server && sudo systemctl enable --now ssh\n" +
+        "- התקנת אפליקציה לטלפון → curl -sX POST http://localhost:5051/android/first-install\n" +
+        "- אל תגיד 'אני לא יכול'\n\n" +
+        "דוגמה:\nUser: התקן vim\nCOMMAND: sudo apt-get install -y vim\nRESPONSE: מתקין.";
 
     // Recall relevant past events → inject into system prompt.
     // Limit to 2 events to keep context lean (each event adds ~50 tokens).

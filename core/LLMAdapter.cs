@@ -56,7 +56,14 @@ public class LLMAdapter : IDisposable
         ArchLogger.LogInfo($"[LLM] Ollama adapter: base={_ollamaBase} model={_model}");
     }
 
-    public void Dispose() => _http.Dispose();
+    private CancellationTokenSource? _keepAliveCts;
+
+    public void Dispose()
+    {
+        _keepAliveCts?.Cancel();
+        _keepAliveCts?.Dispose();
+        _http.Dispose();
+    }
 
     // -----------------------------------------------------------------------
     // Warm-up — loads the model into memory on service startup.
@@ -89,6 +96,49 @@ public class LLMAdapter : IDisposable
                 ArchLogger.LogWarn($"[LLM] Warm-up failed (non-fatal): {ex.Message}");
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Keep-alive loop — pings Ollama every 90 seconds to prevent the model
+    // from being unloaded. Some Ollama versions ignore keep_alive=-1;
+    // this loop ensures the model stays hot regardless of Ollama version.
+    // -----------------------------------------------------------------------
+    public void StartKeepAlive()
+    {
+        _keepAliveCts = new CancellationTokenSource();
+        var ct = _keepAliveCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            // First ping after 80 seconds (Ollama default unload = 5 min,
+            // but some builds use 90s — ping at 80s to be safe).
+            await Task.Delay(TimeSpan.FromSeconds(80), ct).ConfigureAwait(false);
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    var payload = JsonSerializer.Serialize(new
+                    {
+                        model      = _model,
+                        messages   = new[] { new { role = "user", content = "ping" } },
+                        stream     = false,
+                        keep_alive = -1,
+                        options    = new { num_predict = 1, temperature = 0.0 }
+                    });
+                    var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                    await _http.PostAsync($"{_ollamaBase}/api/chat", content, cts.Token);
+                    ArchLogger.LogInfo("[LLM] Keep-alive ping sent");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    ArchLogger.LogWarn($"[LLM] Keep-alive ping failed (non-fatal): {ex.Message}");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(90), ct).ConfigureAwait(false);
+            }
+        }, ct);
     }
 
     // -----------------------------------------------------------------------
