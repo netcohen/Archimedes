@@ -537,31 +537,52 @@ sudo snap refresh --hold chromium 2>/dev/null || true
 # ── Shared: kiosk launcher script (/usr/local/bin/archimedes-kiosk) ────
 sudo tee /usr/local/bin/archimedes-kiosk > /dev/null << KIOSKSH
 #!/bin/bash
-# Archimedes Kiosk Launcher v2
-# Waits for Core → clears Chromium crash flag → opens dashboard in restart loop
+# Archimedes Kiosk Launcher v3
+# Fixes: race condition, duplicate instances, windowed fallback
 
-# Disable X11 DPMS / blanking
+# ── Singleton lock — only one kiosk instance allowed ──────────────────
+LOCK_FILE="/tmp/archimedes-kiosk.lock"
+exec 200>"\$LOCK_FILE"
+flock -n 200 || { echo "[kiosk] already running — exiting"; exit 0; }
+trap "flock -u 200; rm -f \$LOCK_FILE" EXIT
+
+# ── Clean profile on every start (no crash/session state) ─────────────
+KIOSK_PROFILE="/tmp/archimedes-kiosk-profile"
+rm -rf "\$KIOSK_PROFILE"
+mkdir -p "\$KIOSK_PROFILE"
+
+# ── Kill any stale Chromium from previous session ─────────────────────
+pkill -f chromium 2>/dev/null || true
+sleep 1
+
+# ── Wait for DISPLAY to be available (up to 30s) ──────────────────────
+for i in \$(seq 1 30); do
+    xdpyinfo >/dev/null 2>&1 && break
+    sleep 1
+done
+
+# ── Disable X11 DPMS / blanking ───────────────────────────────────────
 xset -dpms   2>/dev/null || true
 xset s off   2>/dev/null || true
 xset s noblank 2>/dev/null || true
 
-# Provide DBUS address for snap confinement
+# ── DBUS for snap confinement ─────────────────────────────────────────
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/\$(id -u)/bus"
 
-# Wait up to 90 s for Archimedes Core to be ready
+# ── Wait up to 90s for Archimedes Core to be ready ────────────────────
 for i in \$(seq 1 45); do
     curl -sf http://localhost:$CORE_PORT/health >/dev/null 2>&1 && break
     sleep 2
 done
 
-# Use a dedicated temp-ish profile dir — prevents session-restore dialogs on every start
-KIOSK_PROFILE="/tmp/archimedes-kiosk-profile"
-mkdir -p "\$KIOSK_PROFILE"
+# ── Detect screen resolution ──────────────────────────────────────────
+RESOLUTION=\$(xrandr 2>/dev/null | grep ' connected primary' | grep -oP '\d+x\d+' | head -1)
+[ -z "\$RESOLUTION" ] && RESOLUTION="1920x1080"
+W=\${RESOLUTION%x*}; H=\${RESOLUTION#*x}
 
-# Restart loop — Chromium restarts automatically if it crashes or is killed
+# ── Restart loop ──────────────────────────────────────────────────────
 while true; do
-    # Clear crash-recovery banner — Snap Chromium stores prefs in a different path than regular.
-    # Check BOTH locations so the fix works regardless of how Chromium was installed.
+    # Clear crash flags in BOTH Snap and regular Chromium pref locations
     for PREF in \\
         "\$HOME/snap/chromium/current/.config/chromium/Default/Preferences" \\
         "\$HOME/.config/chromium/Default/Preferences"; do
@@ -573,6 +594,9 @@ while true; do
 
     /snap/bin/chromium \\
         --kiosk \\
+        --start-fullscreen \\
+        --window-position=0,0 \\
+        --window-size=\${W},\${H} \\
         --user-data-dir="\$KIOSK_PROFILE" \\
         --noerrdialogs \\
         --disable-infobars \\
@@ -587,6 +611,7 @@ while true; do
         --overscroll-history-navigation=0 \\
         http://localhost:$CORE_PORT/dashboard
 
+    # Brief pause before restart — prevents CPU spin on immediate crash
     sleep 3
 done
 KIOSKSH
@@ -662,7 +687,7 @@ Name=Archimedes Kiosk
 Comment=Archimedes AI Agent fullscreen dashboard
 Exec=/usr/local/bin/archimedes-kiosk
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
+X-GNOME-Autostart-Delay=10
 Hidden=false
 NoDisplay=false
 AUTOSTART
