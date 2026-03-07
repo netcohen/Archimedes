@@ -169,6 +169,74 @@ public class AppUpdater
         return null;
     }
 
+    // ── First-time install (USB ADB) ──────────────────────────────────────────
+
+    /// <summary>
+    /// First-time Android app installation via USB ADB.
+    /// Flow:
+    ///   1. Check adb is installed
+    ///   2. adb devices — look for USB-connected device
+    ///   3. Find the APK in the repo
+    ///   4. adb install -r <apk>
+    ///   5. Return Hebrew status message
+    /// </summary>
+    public async Task<string> FirstInstallAsync()
+    {
+        // 1. ADB installed?
+        if (!IsAdbAvailable())
+            return "שגיאה: adb לא מותקן. הרץ: sudo apt-get install -y android-tools-adb";
+
+        // 2. Phone connected via USB?
+        var devices = await RunProcessAsync("adb", "devices", timeoutMs: 8_000);
+        var connectedLines = devices.Stdout
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Skip(1) // skip "List of devices attached" header
+            .Where(l => l.Contains("\tdevice"))
+            .ToList();
+
+        if (connectedLines.Count == 0)
+            return
+                "לא נמצא טלפון מחובר.\n" +
+                "כדי להתקין:\n" +
+                "1. חבר את הטלפון בכבל USB\n" +
+                "2. בטלפון: הגדרות → אפשרויות מפתח → ניפוי באגים USB → הפעל\n" +
+                "3. אשר את ההודעה בטלפון ('אמון במחשב זה')\n" +
+                "4. אמור לי שוב 'התקן את האפליקציה'";
+
+        // 3. Find APK
+        var apkPath = FindApk();
+        if (apkPath == null)
+            return "שגיאה: לא נמצא קובץ APK. ייתכן שהאפליקציה לא נבנתה עדיין. הרץ: cd android && ./gradlew assembleDebug";
+
+        // 4. Install
+        ArchLogger.LogInfo($"[AppUpdater] First install: adb install -r {apkPath}");
+        var result = await RunProcessAsync("adb", $"install -r \"{apkPath}\"", timeoutMs: 60_000);
+
+        if (result.ExitCode == 0 || result.Stdout.Contains("Success"))
+        {
+            ArchLogger.LogInfo("[AppUpdater] First install succeeded");
+            return "האפליקציה הותקנה בהצלחה! פתח את 'Archimedes' בטלפון.";
+        }
+
+        var errLine = (result.Stderr + "\n" + result.Stdout)
+            .Split('\n')
+            .FirstOrDefault(l => l.Trim().Length > 0) ?? "שגיאה לא ידועה";
+        return $"ההתקנה נכשלה: {errLine}";
+    }
+
+    private static string? FindApk()
+    {
+        // Walk up from the executable to find the repo root, then locate the APK
+        var candidates = new[]
+        {
+            Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "..", "..", "..", "..", "android", "app", "build", "outputs", "apk", "debug", "app-debug.apk")),
+            Path.Combine(Directory.GetCurrentDirectory(),
+                "android", "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+        };
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
     // ── ADB availability check ────────────────────────────────────────────────
 
     private static bool IsAdbAvailable()

@@ -992,6 +992,15 @@ app.MapPost("/android/update", async (HttpRequest req) =>
 app.MapGet("/android/update/status", () =>
     Results.Json(appUpdater.GetStatus()));
 
+// Phase 32: POST /android/first-install — first-time USB ADB installation
+// Called by Archimedes chat when user asks to install the Android app.
+// Flow: check adb → adb devices → find APK → adb install -r
+app.MapPost("/android/first-install", async () =>
+{
+    var msg = await appUpdater.FirstInstallAsync();
+    return Results.Json(new { ok = !msg.StartsWith("שגיאה") && !msg.StartsWith("לא נמצא"), message = msg });
+});
+
 // POST /chat/message — routes a user message through LLM → optionally creates a task
 app.MapPost("/chat/message", async (HttpRequest req) =>
 {
@@ -1233,6 +1242,7 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "- IP ברשת המקומית → COMMAND: hostname -I | awk '{print $1}'\n" +
         "  (hostname -i קטנה שגוי — תחזיר 127.0.1.1)\n" +
         "- הפעלת SSH → COMMAND: sudo apt-get install -y openssh-server && sudo systemctl enable ssh && sudo systemctl start ssh\n" +
+        "- התקנת האפליקציה לטלפון → COMMAND: curl -sf -X POST http://localhost:5051/android/first-install | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['message'])\"\n" +
         "- אף פעם אל תגיד 'אני לא יכול'\n\n" +
         "דוגמאות:\n" +
         "User: התקן vim\n" +
