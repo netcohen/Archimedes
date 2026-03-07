@@ -59,6 +59,39 @@ public class LLMAdapter : IDisposable
     public void Dispose() => _http.Dispose();
 
     // -----------------------------------------------------------------------
+    // Warm-up — loads the model into memory on service startup.
+    // Without this, the first user message triggers a cold-start load which
+    // can take 20-40 seconds and causes spurious timeout errors.
+    // -----------------------------------------------------------------------
+    public void WarmUp()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                ArchLogger.LogInfo("[LLM] Warming up model (pre-loading into memory)...");
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+                var payload = JsonSerializer.Serialize(new
+                {
+                    model      = _model,
+                    messages   = new[] { new { role = "user", content = "hi" } },
+                    stream     = false,
+                    keep_alive = -1,
+                    options    = new { num_predict = 1, temperature = 0.0 }
+                });
+                var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                var resp    = await _http.PostAsync(
+                    $"{_ollamaBase}/api/chat", content, cts.Token);
+                ArchLogger.LogInfo($"[LLM] Warm-up complete — status={resp.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                ArchLogger.LogWarn($"[LLM] Warm-up failed (non-fatal): {ex.Message}");
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Health check
     // -----------------------------------------------------------------------
 
@@ -121,14 +154,15 @@ public class LLMAdapter : IDisposable
 
         var payload = JsonSerializer.Serialize(new
         {
-            model    = _model,
-            messages = new[]
+            model      = _model,
+            messages   = new[]
             {
                 new { role = "system", content = systemPrompt },
                 new { role = "user",   content = userContent  }
             },
-            stream  = false,
-            options = new { num_predict = maxTokens, temperature = 0.1 }
+            stream     = false,
+            keep_alive = -1,   // keep model in memory indefinitely
+            options    = new { num_predict = maxTokens, temperature = 0.1 }
         });
 
         ArchLogger.LogInfo($"[LLM] ChatOnce maxTokens={maxTokens} timeout={timeoutSeconds}s");
@@ -169,10 +203,11 @@ public class LLMAdapter : IDisposable
 
         var payload = JsonSerializer.Serialize(new
         {
-            model    = _model,
+            model      = _model,
             messages,
-            stream  = true,
-            options = new { num_predict = maxTokens, temperature = 0.1 }
+            stream     = true,
+            keep_alive = -1,   // keep model in memory indefinitely (no cold-start penalty)
+            options    = new { num_predict = maxTokens, temperature = 0.1 }
         });
 
         var request = new HttpRequestMessage(HttpMethod.Post, $"{_ollamaBase}/api/chat")

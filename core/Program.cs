@@ -31,6 +31,7 @@ var taskService = new TaskService(encryptedStore, deviceKeyManager);
 var policyEngine = new PolicyEngine();
 var approvalService = new ApprovalService(deviceKeyManager);
 var llmAdapter = new LLMAdapter();
+llmAdapter.WarmUp(); // pre-load model into memory so first user message is fast
 
 // Phase 21: Procedure Memory
 var procedureStore = new ProcedureStore();
