@@ -131,6 +131,7 @@ androidBridge.Start();
 var appUpdater = new AppUpdater(httpClientFactory.CreateClient(), androidBridge);
 // Phase 32+: Wire Android app into self-improvement — Archimedes monitors its own mobile component
 selfImprovementEngine.SetAppUpdater(appUpdater);
+selfImprovementEngine.SetEventMemory(eventMemory); // long-term learning from chat
 
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
@@ -138,6 +139,10 @@ var criteriaEngine = new SuccessCriteriaEngine();
 var taskRunner = new TaskRunner(taskService, planner, httpClientFactory.CreateClient(),
     storageManager, traceService, criteriaEngine, procedureStore, failureDialogueStore);
 taskRunner.Start();
+
+// Episodic memory — every chat interaction stored and recalled for long-term learning
+var eventMemory = new EventMemory(storageManager.RootInternal);
+eventMemory.Initialize();
 
 var selfUpdateAudit = new SelfUpdateAudit(storageManager.RootInternal);
 var sandboxRoot = Environment.GetEnvironmentVariable("ARCHIMEDES_SANDBOX_ROOT");
@@ -1244,6 +1249,13 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";
 
+    // Recall relevant past events → inject into system prompt
+    var pastEvents   = eventMemory.Recall(message, limit: 4);
+    var memoryBlock  = EventMemory.FormatForPrompt(pastEvents);
+    var fullSysPrompt = string.IsNullOrEmpty(memoryBlock)
+        ? streamSysPrompt
+        : streamSysPrompt + "\n\n" + memoryBlock;
+
     // Phase 1: stream tokens (pass conversation history for context)
     List<(string Role, string Content)> historySnapshot;
     lock (chatHistory) { historySnapshot = chatHistory.ToList(); }
@@ -1253,7 +1265,7 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     try
     {
         await foreach (var token in llmAdapter.StreamAsync(
-            streamSysPrompt, message, 300, cts.Token, historySnapshot))
+            fullSysPrompt, message, 300, cts.Token, historySnapshot))
         {
             sb.Append(token);
             var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
@@ -1334,7 +1346,6 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     await res.Body.FlushAsync();
 
     // Save this exchange to conversation history (short-term memory)
-    // Assistant content = what the user will see (reply) + command result if any
     var assistantContent = string.IsNullOrEmpty(bashCmd)
         ? $"COMMAND: none\nRESPONSE: {reply}"
         : $"COMMAND: {bashCmd}\nRESPONSE: {reply}"
@@ -1344,11 +1355,20 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     {
         chatHistory.Add(("user",      message));
         chatHistory.Add(("assistant", assistantContent));
-        // Trim to last MAX_HISTORY_TURNS exchanges
         var maxMessages = MAX_HISTORY_TURNS * 2;
         while (chatHistory.Count > maxMessages)
             chatHistory.RemoveAt(0);
     }
+
+    // Save to episodic memory (long-term learning)
+    _ = Task.Run(() => eventMemory.Save(new MemoryEvent
+    {
+        UserMessage = message,
+        Command     = bashCmd ?? "none",
+        Reply       = reply,
+        Output      = cmdOut ?? "",
+        Success     = bashCmd == null || !reply.Contains("⚠")
+    }));
 });
 
 // Clear conversation history (fresh start)
@@ -1356,6 +1376,20 @@ app.MapPost("/chat/reset", () =>
 {
     lock (chatHistory) { chatHistory.Clear(); }
     return Results.Json(new { ok = true, message = "שיחה אופסה" });
+});
+
+// Episodic memory endpoints — inspect what Archimedes has learned
+app.MapGet("/memory", () =>
+{
+    var stats    = eventMemory.GetStats();
+    var recent   = eventMemory.Recall("", limit: 10);
+    var failures = eventMemory.GetFailures(5);
+    return Results.Json(new
+    {
+        stats    = new { stats.Total, stats.Success, stats.Failure, successRate = $"{stats.SuccessRate:P0}" },
+        recent   = recent.Select(e => new { e.Timestamp, e.UserMessage, e.Command, e.Success }),
+        failures = failures.Select(e => new { e.Timestamp, e.UserMessage, e.Command, e.Output })
+    });
 });
 
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────

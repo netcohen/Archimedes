@@ -43,6 +43,8 @@ public sealed class SelfImprovementEngine
     private readonly CodePatcher         _codePatcher;
     // Phase 32+: Android app is part of Archimedes — wired after construction
     private AppUpdater?                  _appUpdater;
+    // Episodic memory — what actually happened in chat interactions
+    private EventMemory?                 _eventMemory;
 
     // ── State ─────────────────────────────────────────────────────────────
     private readonly Queue<SelfWorkItem> _queue      = new();
@@ -121,6 +123,23 @@ public sealed class SelfImprovementEngine
         _appUpdater = appUpdater;
         ArchLogger.LogInfo("[SelfImprove] Android app wired — Archimedes now monitors its mobile component");
     }
+
+    /// <summary>
+    /// Wire episodic memory so the self-improvement engine can learn from
+    /// actual chat interactions — what worked, what failed, recurring patterns.
+    /// </summary>
+    public void SetEventMemory(EventMemory mem)
+    {
+        _eventMemory = mem;
+        ArchLogger.LogInfo("[SelfImprove] Episodic memory wired — self-improvement now learns from chat history");
+    }
+
+    /// <summary>Returns failure patterns from episodic memory for self-analysis.</summary>
+    public List<MemoryEvent> GetRecentFailures(int limit = 10)
+        => _eventMemory?.GetFailures(limit) ?? new();
+
+    /// <summary>Returns episodic memory stats for self-improvement dashboard.</summary>
+    public MemoryStats? GetMemoryStats() => _eventMemory?.GetStats();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
