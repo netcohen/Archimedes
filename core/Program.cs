@@ -350,6 +350,12 @@ app.MapPost("/job/{id}/run-slow", (string id) =>
     return Results.Json(new { runId, message = "Slow run started (5 steps, 2s each)" });
 });
 
+// ── Conversation history (short-term memory) ──────────────────────────────────
+// Keeps the last MAX_HISTORY exchanges so Archimedes remembers context within
+// a session. Each entry is (role, content) where role = "user" | "assistant".
+var chatHistory    = new List<(string Role, string Content)>();
+const int MAX_HISTORY_TURNS = 10; // 10 user + 10 assistant = 20 messages max
+
 var monitorTickCount = 0;
 var monitorCts = new CancellationTokenSource();
 _ = Task.Run(async () =>
@@ -1238,12 +1244,16 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";
 
-    // Phase 1: stream tokens
+    // Phase 1: stream tokens (pass conversation history for context)
+    List<(string Role, string Content)> historySnapshot;
+    lock (chatHistory) { historySnapshot = chatHistory.ToList(); }
+
     var sb  = new System.Text.StringBuilder();
     var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
     try
     {
-        await foreach (var token in llmAdapter.StreamAsync(streamSysPrompt, message, 300, cts.Token))
+        await foreach (var token in llmAdapter.StreamAsync(
+            streamSysPrompt, message, 300, cts.Token, historySnapshot))
         {
             sb.Append(token);
             var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
@@ -1322,6 +1332,30 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     });
     await res.WriteAsync($"data: {doneJson}\n\n");
     await res.Body.FlushAsync();
+
+    // Save this exchange to conversation history (short-term memory)
+    // Assistant content = what the user will see (reply) + command result if any
+    var assistantContent = string.IsNullOrEmpty(bashCmd)
+        ? $"COMMAND: none\nRESPONSE: {reply}"
+        : $"COMMAND: {bashCmd}\nRESPONSE: {reply}"
+          + (string.IsNullOrEmpty(cmdOut) ? "" : $"\nOUTPUT: {cmdOut[..Math.Min(300, cmdOut.Length)]}");
+
+    lock (chatHistory)
+    {
+        chatHistory.Add(("user",      message));
+        chatHistory.Add(("assistant", assistantContent));
+        // Trim to last MAX_HISTORY_TURNS exchanges
+        var maxMessages = MAX_HISTORY_TURNS * 2;
+        while (chatHistory.Count > maxMessages)
+            chatHistory.RemoveAt(0);
+    }
+});
+
+// Clear conversation history (fresh start)
+app.MapPost("/chat/reset", () =>
+{
+    lock (chatHistory) { chatHistory.Clear(); }
+    return Results.Json(new { ok = true, message = "שיחה אופסה" });
 });
 
 // ── Phase 21: Procedure Memory ────────────────────────────────────────────────

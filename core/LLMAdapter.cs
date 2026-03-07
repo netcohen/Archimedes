@@ -149,20 +149,28 @@ public class LLMAdapter : IDisposable
 
     // -----------------------------------------------------------------------
     // Streaming inference — yields tokens one by one
+    // history: list of (role, content) pairs — "user" / "assistant" turns
     // -----------------------------------------------------------------------
 
     public async IAsyncEnumerable<string> StreamAsync(
         string systemPrompt, string userContent, int maxTokens = 150,
-        [EnumeratorCancellation] CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken ct = default,
+        IList<(string Role, string Content)>? history = null)
     {
+        // Build messages array: system → history turns → current user message
+        var messages = new List<object>
+        {
+            new { role = "system", content = systemPrompt }
+        };
+        if (history != null)
+            foreach (var (role, content) in history)
+                messages.Add(new { role, content });
+        messages.Add(new { role = "user", content = userContent });
+
         var payload = JsonSerializer.Serialize(new
         {
             model    = _model,
-            messages = new[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user",   content = userContent  }
-            },
+            messages,
             stream  = true,
             options = new { num_predict = maxTokens, temperature = 0.1 }
         });

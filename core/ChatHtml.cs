@@ -443,6 +443,7 @@ public static class ChatHtml
               <!-- textarea first → RIGHT side; button second → LEFT side -->
               <textarea id="msg-input" rows="1" placeholder="הזן הודעה..."></textarea>
               <button id="send-btn" title="שלח">&#x27A4;</button>
+              <button id="reset-btn" title="שיחה חדשה" style="background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:1rem;" onclick="resetChat()">&#x1F504;</button>
             </div>
           </div>
 
@@ -674,6 +675,12 @@ public static class ChatHtml
             div.innerHTML = html;
             msgs.appendChild(div);
             msgs.scrollTop = msgs.scrollHeight;
+          }
+
+          async function resetChat() {
+            await fetch('/chat/reset', { method: 'POST' });
+            document.getElementById('chat-messages').innerHTML =
+              '<div style="color:#484f58;text-align:center;padding:20px;font-size:.85rem">שיחה חדשה — ארכימדס לא זוכר את השיחה הקודמת</div>';
           }
 
           async function sendMessage() {
