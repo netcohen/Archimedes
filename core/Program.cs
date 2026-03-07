@@ -1233,24 +1233,20 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "- Self-management: git pull, dotnet build, systemctl restart archimedes\n" +
         "- File system: read/write/delete any file\n" +
         "- Monitoring: journalctl, systemctl, df, free, ps\n\n" +
+        "LANGUAGE: You MUST write ONLY in Hebrew (עברית) — NEVER Chinese, NEVER English in RESPONSE.\n" +
         "RULES:\n" +
-        "1. NEVER say 'I cannot'. You are an autonomous agent — always find a way.\n" +
-        "2. Always reply in Hebrew (עברית).\n" +
-        "3. Output EXACTLY:\n" +
-        "COMMAND: <bash command>\n" +
-        "RESPONSE: <Hebrew explanation>\n" +
-        "4. No action needed → COMMAND: none\n" +
-        "5. RESTART RULES (critical):\n" +
-        "   'restart' / 'reboot' / 'הפעל מחדש' / 'אתחל' → COMMAND: sudo reboot\n" +
-        "   NEVER use 'systemctl restart archimedes' for a user restart request.\n" +
-        "   'restart only the service' → COMMAND: sudo systemctl restart archimedes\n\n" +
+        "1. NEVER say 'I cannot'. Always find a way.\n" +
+        "2. Output EXACTLY this format — no exceptions:\n" +
+        "COMMAND: <bash command or none>\n" +
+        "RESPONSE: <עברית בלבד>\n" +
+        "3. RESTART: 'restart'/'reboot'/'הפעל מחדש'/'אתחל' → COMMAND: sudo reboot\n\n" +
         "EXAMPLES:\n" +
         "User: תעשה הפעלה מחדש\n" +
         "COMMAND: sudo reboot\n" +
-        "RESPONSE: מאתחל את המחשב. יחזור בעוד כדקה.\n" +
+        "RESPONSE: מאתחל. יחזור בעוד כדקה.\n" +
         "User: add Hebrew keyboard\n" +
         "COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "RESPONSE: מוסיף עברית למקלדת — Alt+Shift להחלפה.\n" +
+        "RESPONSE: מוסיף עברית — Alt+Shift להחלפה.\n" +
         "User: install vim\n" +
         "COMMAND: sudo apt-get install -y vim\n" +
         "RESPONSE: מתקין vim.";
@@ -1430,16 +1426,17 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
             await res.Body.FlushAsync();
 
             // ── Ask LLM for an alternative approach ───────────────────────────
+            // Error context is in Hebrew only — prevents qwen2.5:7b from
+            // switching to Chinese when it sees mixed Hebrew/English input.
+            var errorSummary = cmdOut?[..Math.Min(200, cmdOut?.Length ?? 0)] ?? "";
             var errorCtx =
-                "PREVIOUS COMMAND FAILED:\n" +
-                $"Command:   {currentCmd}\n" +
-                $"Exit code: {exitCode}\n" +
-                $"Error output: {cmdOut?[..Math.Min(400, cmdOut?.Length ?? 0)]}\n\n" +
-                $"Original user request: {message}\n\n" +
-                "Provide an ALTERNATIVE command that avoids this error.\n" +
-                "Use this EXACT format:\n" +
-                "COMMAND: <alternative bash command>\n" +
-                "RESPONSE: <Hebrew explanation of the new approach>";
+                $"הפקודה נכשלה:\n" +
+                $"פקודה: {currentCmd}\n" +
+                $"שגיאה: {errorSummary}\n" +
+                $"בקשה מקורית: {message}\n\n" +
+                "הצע פקודה חלופית שתפתור את הבעיה. פורמט חובה:\n" +
+                "COMMAND: <פקודת bash>\n" +
+                "RESPONSE: <הסבר בעברית>";
 
             var altSb       = new System.Text.StringBuilder();
             var altCts      = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -1447,13 +1444,26 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
             try
             {
                 await foreach (var tok in llmAdapter.StreamAsync(
-                    streamSysPrompt, errorCtx, 250, altCts.Token))
+                    streamSysPrompt, errorCtx, 200, altCts.Token))
                 {
                     altSb.Append(tok);
-                    // Stream retry tokens so the user sees progress in the chat box
-                    var rtJson = JsonSerializer.Serialize(new { type = "retry_token", token = tok });
-                    await res.WriteAsync($"data: {rtJson}\n\n");
-                    await res.Body.FlushAsync();
+                    // Stream retry tokens so the user sees progress in the chat box.
+                    // Wrap each write — client may disconnect (BodyStreamBuffer abort).
+                    try
+                    {
+                        var rtJson = JsonSerializer.Serialize(
+                            new { type = "retry_token", token = tok });
+                        await res.WriteAsync($"data: {rtJson}\n\n");
+                        await res.Body.FlushAsync();
+                    }
+                    catch (Exception writeEx)
+                    {
+                        // Client disconnected mid-stream — stop streaming but keep
+                        // collecting the LLM output so we can still execute the command
+                        ArchLogger.LogWarn(
+                            $"[Chat/Stream] Client disconnected during retry: {writeEx.Message}");
+                        break;
+                    }
                 }
             }
             catch (Exception ex2)
