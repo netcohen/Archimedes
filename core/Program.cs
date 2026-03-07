@@ -1230,6 +1230,9 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "- הפעלה מחדש / restart / reboot → COMMAND: sudo reboot\n" +
         "- מקלדת עברית → COMMAND: sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
         "  (אסור setxkbmap — אין DISPLAY בשירות)\n" +
+        "- IP ברשת המקומית → COMMAND: hostname -I | awk '{print $1}'\n" +
+        "  (hostname -i קטנה שגוי — תחזיר 127.0.1.1)\n" +
+        "- הפעלת SSH → COMMAND: sudo apt-get install -y openssh-server && sudo systemctl enable ssh && sudo systemctl start ssh\n" +
         "- אף פעם אל תגיד 'אני לא יכול'\n\n" +
         "דוגמאות:\n" +
         "User: התקן vim\n" +
@@ -1237,7 +1240,10 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         "RESPONSE: מתקין vim.\n" +
         "User: הפעל מחדש\n" +
         "COMMAND: sudo reboot\n" +
-        "RESPONSE: מאתחל. יחזור בעוד כדקה.";
+        "RESPONSE: מאתחל. יחזור בעוד כדקה.\n" +
+        "User: מה ה-IP?\n" +
+        "COMMAND: hostname -I | awk '{print $1}'\n" +
+        "RESPONSE: בודק IP.";
 
     // Recall relevant past events → inject into system prompt.
     // Limit to 2 events to keep context lean (each event adds ~50 tokens).
@@ -1253,6 +1259,7 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
 
     var sb  = new System.Text.StringBuilder();
     var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); // 2-minute ceiling
+    bool clientAborted = false;
     try
     {
         await foreach (var token in llmAdapter.StreamAsync(
@@ -1260,21 +1267,45 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         {
             sb.Append(token);
             var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
-            await res.WriteAsync($"data: {tokenJson}\n\n");
-            await res.Body.FlushAsync();
+            try
+            {
+                await res.WriteAsync($"data: {tokenJson}\n\n");
+                await res.Body.FlushAsync();
+            }
+            catch
+            {
+                // Client disconnected during Phase 1 streaming — stop writing but
+                // keep collecting tokens so we can still execute the command.
+                clientAborted = true;
+                break;
+            }
         }
     }
     catch (OperationCanceledException)
     {
-        await res.WriteAsync("data: {\"type\":\"error\",\"msg\":\"timeout — ה-LLM לא הגיב בזמן\"}\n\n");
-        await res.Body.FlushAsync();
+        if (!clientAborted)
+        {
+            try
+            {
+                await res.WriteAsync("data: {\"type\":\"error\",\"msg\":\"timeout — ה-LLM לא הגיב בזמן\"}\n\n");
+                await res.Body.FlushAsync();
+            }
+            catch { /* stream already dead */ }
+        }
         return;
     }
     catch (Exception ex)
     {
-        var errJson = JsonSerializer.Serialize(new { type = "error", msg = ex.Message });
-        await res.WriteAsync($"data: {errJson}\n\n");
-        await res.Body.FlushAsync();
+        if (!clientAborted)
+        {
+            try
+            {
+                var errJson = JsonSerializer.Serialize(new { type = "error", msg = ex.Message });
+                await res.WriteAsync($"data: {errJson}\n\n");
+                await res.Body.FlushAsync();
+            }
+            catch { /* stream already dead */ }
+        }
         return;
     }
     finally { cts.Dispose(); }
@@ -1410,8 +1441,12 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
                 attempt,
                 msg     = $"שגיאה בניסיון {attempt} — מנסה גישה אחרת..."
             });
-            await res.WriteAsync($"data: {retryEvt}\n\n");
-            await res.Body.FlushAsync();
+            try
+            {
+                await res.WriteAsync($"data: {retryEvt}\n\n");
+                await res.Body.FlushAsync();
+            }
+            catch { /* client disconnected — continue retry anyway */ }
 
             // ── Ask LLM for an alternative approach ───────────────────────────
             // Error context is in Hebrew only — prevents qwen2.5:7b from
@@ -1503,8 +1538,12 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
         command = bashCmd,
         output  = cmdOut
     });
-    await res.WriteAsync($"data: {doneJson}\n\n");
-    await res.Body.FlushAsync();
+    try
+    {
+        await res.WriteAsync($"data: {doneJson}\n\n");
+        await res.Body.FlushAsync();
+    }
+    catch { /* client disconnected before done — ignore */ }
 
     // Save this exchange to conversation history (short-term memory).
     // Keep OUTPUT short in history — long outputs inflate context and slow the model.
