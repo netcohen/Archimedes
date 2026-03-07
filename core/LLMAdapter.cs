@@ -321,6 +321,136 @@ public class LLMAdapter : IDisposable
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 36 — Chat-specific intent parsing
+    // Heuristic runs first (0ms), LLM only for ambiguous inputs.
+    // -----------------------------------------------------------------------
+
+    public async Task<InterpretResult> ChatInterpret(string userMessage)
+    {
+        ArchLogger.LogInfo($"[LLM] ChatInterpret len={userMessage.Length}");
+
+        // Fast path: heuristic (no LLM call)
+        var heuristic = HeuristicChatInterpret(userMessage);
+        if (heuristic.Intent != "UNKNOWN") return heuristic;
+
+        // Slow path: LLM for ambiguous input
+        var sanitized = SanitizeForLLM(userMessage);
+        const string sys =
+            "You are an intent classifier for a Linux AI agent. " +
+            "Return ONLY valid JSON: {\"intent\":\"...\",\"slots\":{},\"confidence\":0.0}\n" +
+            "Intents: INSTALL_PACKAGE, REMOVE_PACKAGE, ENABLE_SERVICE, DISABLE_SERVICE, " +
+            "START_SERVICE, STOP_SERVICE, REBOOT, SHOW_IP, CHECK_DISK, CHECK_MEMORY, " +
+            "SHOW_FILES, INSTALL_ANDROID_APP, QUESTION, UNKNOWN\n" +
+            "Slots: INSTALL/REMOVE→{\"tool\":\"name\"}, SERVICE→{\"service\":\"name\"}";
+        try
+        {
+            var raw    = await ChatOnce(sys, sanitized, maxTokens: 80, timeoutSeconds: 20);
+            var json   = raw == null ? null : ExtractJson(raw);
+            var parsed = json == null ? null : JsonSerializer.Deserialize<InterpretResult>(
+                json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (parsed != null && !string.IsNullOrEmpty(parsed.Intent))
+                return parsed;
+        }
+        catch (Exception ex) { ArchLogger.LogWarn($"[LLM] ChatInterpret LLM: {ex.Message}"); }
+
+        return heuristic;
+    }
+
+    private static InterpretResult HeuristicChatInterpret(string msg)
+    {
+        var lo  = msg.ToLowerInvariant();
+        var res = new InterpretResult { IsHeuristicFallback = true, Confidence = 0.85 };
+
+        if (Regex.IsMatch(lo, @"\breboot\b|\brestart\b|הפעל\s*מחדש|אתחל"))
+            { res.Intent = "REBOOT"; return res; }
+
+        if (Regex.IsMatch(lo, @"\bip\b|כתובת.*(רשת|ip)|what.*ip"))
+            { res.Intent = "SHOW_IP"; return res; }
+
+        if (Regex.IsMatch(lo, @"(install|התקן).*(app|אפליקציה|android)|(app|אפליקציה).*(install|התקן)"))
+            { res.Intent = "INSTALL_ANDROID_APP"; return res; }
+
+        if (Regex.IsMatch(lo, @"(enable|הפעל|start).*(ssh|service|שירות)|ssh.*(enable|הפעל|on)"))
+        {
+            var svc = Regex.Match(lo, @"\b(ssh|nginx|apache|mysql|postgresql|docker|ufw)\b").Value;
+            res.Intent = "ENABLE_SERVICE";
+            if (!string.IsNullOrEmpty(svc)) res.Slots["service"] = svc;
+            return res;
+        }
+
+        var instM = Regex.Match(lo, @"(?:install|התקן)\s+(\w[\w\-\.]+)");
+        if (instM.Success)
+            { res.Intent = "INSTALL_PACKAGE"; res.Slots["tool"] = instM.Groups[1].Value; return res; }
+
+        var remM = Regex.Match(lo, @"(?:remove|uninstall|הסר)\s+(\w[\w\-\.]+)");
+        if (remM.Success)
+            { res.Intent = "REMOVE_PACKAGE"; res.Slots["tool"] = remM.Groups[1].Value; return res; }
+
+        if (Regex.IsMatch(lo, @"disk|דיסק|storage|אחסון|\bdf\b"))
+            { res.Intent = "CHECK_DISK"; return res; }
+
+        if (Regex.IsMatch(lo, @"memory|ram|זיכרון|\bfree\b"))
+            { res.Intent = "CHECK_MEMORY"; return res; }
+
+        if (msg.TrimEnd().EndsWith('?') ||
+            Regex.IsMatch(lo, @"^(why|what|how|when|למה|מה|איך|מתי|הסבר|explain)\b"))
+            { res.Intent = "QUESTION"; return res; }
+
+        res.Intent = "UNKNOWN"; res.Confidence = 0.3;
+        return res;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36 — Generate a bash command (one-time LLM call per new intent).
+    // -----------------------------------------------------------------------
+
+    public async Task<string?> GenerateCommand(
+        InterpretResult intent, string userMessage, int timeoutSeconds = 30)
+    {
+        ArchLogger.LogInfo($"[LLM] GenerateCommand intent={intent.Intent}");
+        const string sys =
+            "אתה מומחה Linux/Ubuntu עם sudo מלא. " +
+            "החזר רק פקודת bash אחת שמבצעת את הבקשה. " +
+            "ללא הסבר, ללא markdown, ללא backticks.";
+        var slotsStr = intent.Slots.Count > 0
+            ? string.Join(", ", intent.Slots.Select(s => $"{s.Key}={s.Value}"))
+            : "—";
+        var user = $"בקשה: {userMessage}\nIntent: {intent.Intent}\nSlots: {slotsStr}";
+        try
+        {
+            var cmd = await ChatOnce(sys, user, maxTokens: 60, timeoutSeconds: timeoutSeconds);
+            if (string.IsNullOrWhiteSpace(cmd)) return null;
+            cmd = cmd.Trim().Trim('`').Replace("```bash", "").Replace("```", "").Trim();
+            return cmd.Equals("none", StringComparison.OrdinalIgnoreCase) ? null : cmd;
+        }
+        catch (Exception ex)
+        {
+            ArchLogger.LogWarn($"[LLM] GenerateCommand failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36 — Stream a Hebrew narration of machine output for the user.
+    // -----------------------------------------------------------------------
+
+    public async IAsyncEnumerable<string> NarrateStream(
+        string command, string output, int exitCode, string userMessage,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        const string sys = "תרגם פלט מכונה למשפט אחד בעברית. היה קצר וברור.";
+        var result  = exitCode == 0 ? "הצליחה" : "נכשלה";
+        var outSnip = output.Length > 200 ? output[..200] + "..." : output;
+        var user    = $"בקשה: {userMessage}\nפקודה: {command}\nתוצאה: {result}\nפלט: {outSnip}";
+        await foreach (var tok in StreamAsync(sys, user, 80, ct))
+            yield return tok;
+    }
+
+    // -----------------------------------------------------------------------
+    // Original Interpret (kept for SelfImprovementEngine, non-chat uses)
+    // -----------------------------------------------------------------------
+
     public async Task<InterpretResult> Interpret(string userPrompt)
     {
         ArchLogger.LogInfo($"[LLM] Interpret len={userPrompt.Length}");

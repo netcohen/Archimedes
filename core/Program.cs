@@ -34,6 +34,10 @@ var llmAdapter = new LLMAdapter();
 llmAdapter.WarmUp();          // pre-load model into memory so first user message is fast
 llmAdapter.StartKeepAlive(); // ping every 90s — prevents model unload between messages
 
+// Phase 36: CommandStore + ChatOrchestrator (wired after eventMemory below)
+CommandStore?    commandStore    = null;
+ChatOrchestrator? chatOrchestrator = null;
+
 // Phase 21: Procedure Memory
 var procedureStore = new ProcedureStore();
 
@@ -138,6 +142,10 @@ selfImprovementEngine.SetAppUpdater(appUpdater);
 var eventMemory = new EventMemory(storageManager.RootInternal);
 eventMemory.Initialize();
 selfImprovementEngine.SetEventMemory(eventMemory); // long-term learning from chat
+
+// Phase 36: wire CommandStore + ChatOrchestrator (eventMemory now ready)
+commandStore     = new CommandStore(storageManager.RootInternal);
+chatOrchestrator = new ChatOrchestrator(llmAdapter, commandStore, eventMemory);
 
 // Phase 20: Success Criteria Engine
 var criteriaEngine = new SuccessCriteriaEngine();
@@ -356,12 +364,6 @@ app.MapPost("/job/{id}/run-slow", (string id) =>
     
     return Results.Json(new { runId, message = "Slow run started (5 steps, 2s each)" });
 });
-
-// ── Conversation history (short-term memory) ──────────────────────────────────
-// Keeps the last MAX_HISTORY exchanges so Archimedes remembers context within
-// a session. Each entry is (role, content) where role = "user" | "assistant".
-var chatHistory    = new List<(string Role, string Content)>();
-const int MAX_HISTORY_TURNS = 3;  // 3 turns = 6 messages — minimal context for speed
 
 var monitorTickCount = 0;
 var monitorCts = new CancellationTokenSource();
@@ -1203,8 +1205,9 @@ app.MapPost("/chat/ask", async (HttpRequest req) =>
 });
 
 // POST /chat/stream — streaming chat via Server-Sent Events (SSE)
-// Tokens appear in the dashboard one-by-one as the LLM generates them.
-// Flow: LLM streams COMMAND:/RESPONSE: format → at done, execute command → send final event.
+// Phase 36: thin SSE wrapper — all logic lives in ChatOrchestrator.
+// LLM = translator only (human→intent, machine-output→Hebrew).
+// C# = brain (command lookup, execution, retry, learning).
 app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
 {
     using var sr = new StreamReader(req.Body);
@@ -1228,352 +1231,60 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     res.Headers["X-Accel-Buffering"] = "no";
     res.Headers["Connection"]         = "keep-alive";
 
-    // Kept intentionally SHORT — every extra token = slower response on low-end hardware.
-    const string streamSysPrompt =
-        "אתה ארכימדס — סוכן AI אוטונומי על Ubuntu 24.04 עם sudo מלא.\n" +
-        "ענה תמיד בעברית. מונחים טכניים — אנגלית מותרת.\n" +
-        "פורמט חובה:\nCOMMAND: <bash או none>\nRESPONSE: <עברית>\n\n" +
-        "כללים:\n" +
-        "- reboot/restart → sudo reboot\n" +
-        "- מקלדת עברית → sudo localectl set-x11-keymap us,il '' '' grp:alt_shift_toggle\n" +
-        "- IP ברשת → hostname -I | awk '{print $1}'  (לא hostname -i)\n" +
-        "- SSH → sudo apt-get install -y openssh-server && sudo systemctl enable --now ssh\n" +
-        "- התקנת אפליקציה לטלפון → curl -sX POST http://localhost:5051/android/first-install\n" +
-        "- אל תגיד 'אני לא יכול'\n\n" +
-        "דוגמה:\nUser: התקן vim\nCOMMAND: sudo apt-get install -y vim\nRESPONSE: מתקין.";
-
-    // Recall relevant past events → inject into system prompt.
-    // Limit to 2 events to keep context lean (each event adds ~50 tokens).
-    var pastEvents   = eventMemory.Recall(message, limit: 2);
-    var memoryBlock  = EventMemory.FormatForPrompt(pastEvents);
-    var fullSysPrompt = string.IsNullOrEmpty(memoryBlock)
-        ? streamSysPrompt
-        : streamSysPrompt + "\n\n" + memoryBlock;
-
-    // Phase 1: stream tokens (pass conversation history for context)
-    List<(string Role, string Content)> historySnapshot;
-    lock (chatHistory) { historySnapshot = chatHistory.ToList(); }
-
-    var sb  = new System.Text.StringBuilder();
-    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); // 2-minute ceiling
-    bool clientAborted = false;
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
     try
     {
-        await foreach (var token in llmAdapter.StreamAsync(
-            fullSysPrompt, message, 200, cts.Token, historySnapshot))
+        await foreach (var evt in chatOrchestrator!.HandleAsync(message, cts.Token))
         {
-            sb.Append(token);
-            var tokenJson = JsonSerializer.Serialize(new { type = "token", token });
+            var sseData = evt.Type switch
+            {
+                ChatEventType.Token  => JsonSerializer.Serialize(
+                    new { type = "token",  token   = evt.Data }),
+                ChatEventType.Status => JsonSerializer.Serialize(
+                    new { type = "status", msg     = evt.Data }),
+                ChatEventType.Done   => JsonSerializer.Serialize(
+                    new { type = "done",   reply   = evt.Data,
+                          command = evt.Command,   output = evt.Output }),
+                ChatEventType.Error  => JsonSerializer.Serialize(
+                    new { type = "error",  msg     = evt.Data }),
+                _                    => JsonSerializer.Serialize(
+                    new { type = "unknown", data   = evt.Data })
+            };
+
             try
             {
-                await res.WriteAsync($"data: {tokenJson}\n\n");
+                await res.WriteAsync($"data: {sseData}\n\n");
                 await res.Body.FlushAsync();
             }
-            catch
-            {
-                // Client disconnected during Phase 1 streaming — stop writing but
-                // keep collecting tokens so we can still execute the command.
-                clientAborted = true;
-                break;
-            }
+            catch { break; } // client disconnected
         }
     }
     catch (OperationCanceledException)
     {
-        if (!clientAborted)
+        try
         {
-            try
-            {
-                await res.WriteAsync("data: {\"type\":\"error\",\"msg\":\"timeout — ה-LLM לא הגיב בזמן\"}\n\n");
-                await res.Body.FlushAsync();
-            }
-            catch { /* stream already dead */ }
+            await res.WriteAsync(
+                "data: {\"type\":\"error\",\"msg\":\"timeout — ה-LLM לא הגיב בזמן\"}\n\n");
+            await res.Body.FlushAsync();
         }
-        return;
+        catch { /* stream already dead */ }
     }
     catch (Exception ex)
     {
-        if (!clientAborted)
+        try
         {
-            try
-            {
-                var errJson = JsonSerializer.Serialize(new { type = "error", msg = ex.Message });
-                await res.WriteAsync($"data: {errJson}\n\n");
-                await res.Body.FlushAsync();
-            }
-            catch { /* stream already dead */ }
+            var errJson = JsonSerializer.Serialize(new { type = "error", msg = ex.Message });
+            await res.WriteAsync($"data: {errJson}\n\n");
+            await res.Body.FlushAsync();
         }
-        return;
+        catch { /* stream already dead */ }
     }
-    finally { cts.Dispose(); }
-
-    // Phase 2: parse COMMAND:/RESPONSE:
-    var fullText    = sb.ToString().Trim();
-    string? bashCmd = null;
-    string reply    = fullText;
-
-    foreach (var line in fullText.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-    {
-        if (line.StartsWith("COMMAND:", StringComparison.OrdinalIgnoreCase))
-        {
-            var cmd = line["COMMAND:".Length..].Trim();
-            if (!string.IsNullOrEmpty(cmd) && !cmd.Equals("none", StringComparison.OrdinalIgnoreCase))
-                bashCmd = cmd;
-        }
-        else if (line.StartsWith("RESPONSE:", StringComparison.OrdinalIgnoreCase))
-        {
-            reply = line["RESPONSE:".Length..].Trim();
-        }
-    }
-
-    // Phase 3: execute command — with automatic retry loop (up to 2 attempts).
-    // On failure: stream a "retry" SSE event → ask LLM for alternative → execute.
-    // This is how Archimedes learns to recover from errors instead of just reporting them.
-    string? cmdOut = null;
-    bool    cmdOk  = true;
-
-    // Detect commands that kill the server (reboot/shutdown/restart archimedes).
-    // These must send "done" FIRST — the server dies before it can respond otherwise.
-    static bool IsDisruptive(string? cmd) =>
-        cmd != null && System.Text.RegularExpressions.Regex.IsMatch(cmd,
-            @"\breboot\b|\bshutdown\b|\bpoweroff\b|\bhalt\b|systemctl\s+restart\s+archimedes");
-
-    if (!string.IsNullOrEmpty(bashCmd) && IsDisruptive(bashCmd))
-    {
-        // Send done BEFORE the command — client gets its response while server is still up
-        var earlyOut  = "מבצע... החיבור יינתק לרגע";
-        var earlyDone = JsonSerializer.Serialize(new
-            { type = "done", reply, command = bashCmd, output = earlyOut });
-        await res.WriteAsync($"data: {earlyDone}\n\n");
-        await res.Body.FlushAsync();
-
-        // Delay 800ms so the browser receives and renders the event, then execute
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(800);
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo(
-                    "bash", new[] { "-c", bashCmd })
-                { UseShellExecute = false };
-                System.Diagnostics.Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                ArchLogger.LogWarn($"[Chat/Stream] Disruptive cmd failed: {ex.Message}");
-            }
-        });
-
-        _ = Task.Run(() => eventMemory.Save(new MemoryEvent
-        {
-            UserMessage = message,
-            Command     = bashCmd,
-            Reply       = reply,
-            Output      = earlyOut,
-            Success     = true
-        }));
-        return;
-    }
-
-    if (!string.IsNullOrEmpty(bashCmd))
-    {
-        const int MAX_CMD_RETRIES = 2;
-        string    currentCmd      = bashCmd;
-
-        for (int attempt = 1; attempt <= MAX_CMD_RETRIES; attempt++)
-        {
-            ArchLogger.LogInfo($"[Chat/Stream] Executing (attempt {attempt}/{MAX_CMD_RETRIES}): {currentCmd}");
-            int exitCode = -1;
-
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo("bash", new[] { "-c", currentCmd })
-                {
-                    RedirectStandardOutput = true,
-                    RedirectStandardError  = true,
-                    UseShellExecute        = false
-                };
-                using var proc = System.Diagnostics.Process.Start(psi)!;
-                var outSb = new System.Text.StringBuilder();
-                proc.OutputDataReceived += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
-                proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) outSb.AppendLine(e.Data); };
-                proc.BeginOutputReadLine();
-                proc.BeginErrorReadLine();
-                using var cmdCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                await proc.WaitForExitAsync(cmdCts.Token);
-                cmdOut   = outSb.ToString().Trim();
-                exitCode = proc.ExitCode;
-            }
-            catch (Exception ex)
-            {
-                cmdOut   = "שגיאה: " + ex.Message;
-                exitCode = -1;
-                cmdOk    = false;
-                ArchLogger.LogWarn($"[Chat/Stream] Execute exception: {ex.Message}");
-                break;
-            }
-
-            if (exitCode == 0)
-            {
-                cmdOk   = true;
-                bashCmd = currentCmd;   // report the command that actually succeeded
-                ArchLogger.LogInfo($"[Chat/Stream] Command succeeded on attempt {attempt}");
-                break;
-            }
-
-            // ── Command failed ─────────────────────────────────────────────────
-            cmdOk = false;
-            ArchLogger.LogWarn($"[Chat/Stream] Cmd failed exit={exitCode} attempt={attempt}: {currentCmd}");
-
-            if (attempt == MAX_CMD_RETRIES)
-            {
-                reply += $"\n⚠ הפקודה נכשלה לאחר {MAX_CMD_RETRIES} ניסיונות (קוד {exitCode}).";
-                break;
-            }
-
-            // ── Notify client we are retrying ──────────────────────────────────
-            var retryEvt = JsonSerializer.Serialize(new
-            {
-                type    = "retry",
-                attempt,
-                msg     = $"שגיאה בניסיון {attempt} — מנסה גישה אחרת..."
-            });
-            try
-            {
-                await res.WriteAsync($"data: {retryEvt}\n\n");
-                await res.Body.FlushAsync();
-            }
-            catch { /* client disconnected — continue retry anyway */ }
-
-            // ── Ask LLM for an alternative approach ───────────────────────────
-            // Error context is in Hebrew only — prevents qwen2.5:7b from
-            // switching to Chinese when it sees mixed Hebrew/English input.
-            var errorSummary = cmdOut?[..Math.Min(200, cmdOut?.Length ?? 0)] ?? "";
-            var errorCtx =
-                $"הפקודה נכשלה:\n" +
-                $"פקודה: {currentCmd}\n" +
-                $"שגיאה: {errorSummary}\n" +
-                $"בקשה מקורית: {message}\n\n" +
-                "הצע פקודה חלופית שתפתור את הבעיה. פורמט חובה:\n" +
-                "COMMAND: <פקודת bash>\n" +
-                "RESPONSE: <הסבר בעברית>";
-
-            var altSb       = new System.Text.StringBuilder();
-            var altCts      = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            bool llmRetryOk = true;
-            try
-            {
-                await foreach (var tok in llmAdapter.StreamAsync(
-                    streamSysPrompt, errorCtx, 200, altCts.Token))
-                {
-                    altSb.Append(tok);
-                    // Stream retry tokens so the user sees progress in the chat box.
-                    // Wrap each write — client may disconnect (BodyStreamBuffer abort).
-                    try
-                    {
-                        var rtJson = JsonSerializer.Serialize(
-                            new { type = "retry_token", token = tok });
-                        await res.WriteAsync($"data: {rtJson}\n\n");
-                        await res.Body.FlushAsync();
-                    }
-                    catch (Exception writeEx)
-                    {
-                        // Client disconnected mid-stream — stop streaming but keep
-                        // collecting the LLM output so we can still execute the command
-                        ArchLogger.LogWarn(
-                            $"[Chat/Stream] Client disconnected during retry: {writeEx.Message}");
-                        break;
-                    }
-                }
-            }
-            catch (Exception ex2)
-            {
-                ArchLogger.LogWarn($"[Chat/Stream] Retry LLM call failed: {ex2.Message}");
-                reply     += "\n⚠ הפקודה נכשלה ולא הצלחתי לקבל גישה חלופית מה-LLM.";
-                llmRetryOk = false;
-            }
-            finally { altCts.Dispose(); }
-
-            if (!llmRetryOk) break;
-
-            // ── Parse alternative command from LLM ────────────────────────────
-            string? altCmd   = null;
-            string  altReply = reply;
-            foreach (var ln in altSb.ToString().Trim()
-                         .Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (ln.StartsWith("COMMAND:", StringComparison.OrdinalIgnoreCase))
-                {
-                    var c = ln["COMMAND:".Length..].Trim();
-                    if (!string.IsNullOrEmpty(c) &&
-                        !c.Equals("none", StringComparison.OrdinalIgnoreCase))
-                        altCmd = c;
-                }
-                else if (ln.StartsWith("RESPONSE:", StringComparison.OrdinalIgnoreCase))
-                    altReply = ln["RESPONSE:".Length..].Trim();
-            }
-
-            if (string.IsNullOrEmpty(altCmd))
-            {
-                reply += "\n⚠ הפקודה נכשלה ולא נמצאה גישה חלופית.";
-                break;
-            }
-
-            // ── Prepare next iteration ────────────────────────────────────────
-            currentCmd = altCmd;
-            bashCmd    = altCmd;    // update so Phase 4 reports the final command
-            reply      = altReply;
-            ArchLogger.LogInfo($"[Chat/Stream] Retrying with alternative: {altCmd}");
-        }
-    }
-
-    // Phase 4: send done event with parsed data
-    var doneJson = JsonSerializer.Serialize(new
-    {
-        type    = "done",
-        reply,
-        command = bashCmd,
-        output  = cmdOut
-    });
-    try
-    {
-        await res.WriteAsync($"data: {doneJson}\n\n");
-        await res.Body.FlushAsync();
-    }
-    catch { /* client disconnected before done — ignore */ }
-
-    // Save this exchange to conversation history (short-term memory).
-    // Keep OUTPUT short in history — long outputs inflate context and slow the model.
-    var assistantContent = string.IsNullOrEmpty(bashCmd)
-        ? $"COMMAND: none\nRESPONSE: {reply}"
-        : $"COMMAND: {bashCmd}\nRESPONSE: {reply}"
-          + (string.IsNullOrEmpty(cmdOut) ? "" : $"\nOUTPUT: {cmdOut[..Math.Min(80, cmdOut.Length)]}");
-
-    lock (chatHistory)
-    {
-        chatHistory.Add(("user",      message));
-        chatHistory.Add(("assistant", assistantContent));
-        var maxMessages = MAX_HISTORY_TURNS * 2;
-        while (chatHistory.Count > maxMessages)
-            chatHistory.RemoveAt(0);
-    }
-
-    // Save to episodic memory (long-term learning)
-    // cmdOk = true when no command ran OR the command exited 0 (possibly after retries)
-    _ = Task.Run(() => eventMemory.Save(new MemoryEvent
-    {
-        UserMessage = message,
-        Command     = bashCmd ?? "none",
-        Reply       = reply,
-        Output      = cmdOut ?? "",
-        Success     = bashCmd == null || cmdOk
-    }));
 });
 
 // Clear conversation history (fresh start)
 app.MapPost("/chat/reset", () =>
 {
-    lock (chatHistory) { chatHistory.Clear(); }
+    chatOrchestrator?.ClearHistory();
     return Results.Json(new { ok = true, message = "שיחה אופסה" });
 });
 

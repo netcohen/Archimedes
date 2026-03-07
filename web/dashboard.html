@@ -610,6 +610,11 @@ async function sendChat() {
                     botEl.textContent = display + '▍';
                     chatMsgs.scrollTop = chatMsgs.scrollHeight;
 
+                } else if (evt.type === 'status') {
+                    // Phase 36: C# brain sends status updates (e.g. "מחשב פקודה...")
+                    botEl.textContent = (evt.msg || '') + ' ▍';
+                    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+
                 } else if (evt.type === 'retry') {
                     // First attempt failed — freeze the current bubble as a warning,
                     // then open a fresh bubble for the LLM's alternative approach.
