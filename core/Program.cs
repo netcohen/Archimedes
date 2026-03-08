@@ -1231,7 +1231,9 @@ app.MapPost("/chat/stream", async (HttpRequest req, HttpResponse res) =>
     res.Headers["X-Accel-Buffering"] = "no";
     res.Headers["Connection"]         = "keep-alive";
 
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+    // Absolute ceiling — the IdleWatchdog inside ChatOrchestrator handles stuck/crashed LLM.
+    // 5 minutes allows long apt-get installs and slow hardware without false positives.
+    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
     try
     {
         await foreach (var evt in chatOrchestrator!.HandleAsync(message, cts.Token))

@@ -86,9 +86,12 @@ public class ChatOrchestrator
             List<(string, string)> histSnap;
             lock (_history) { histSnap = _history.ToList(); }
 
-            const string qSys = "ענה בעברית בקצרה ובבירור. מונחים טכניים — אנגלית מותרת.";
+            const string qSys = "ענה בעברית בבירור. מונחים טכניים — אנגלית מותרת.";
             var sb = new StringBuilder();
-            await foreach (var tok in _llm.StreamAsync(qSys, userMessage, 150, ct, histSnap))
+            var qStream = WithIdleTimeout(
+                _llm.StreamAsync(qSys, userMessage, 400, ct, histSnap),
+                idleSeconds: 15, ct: ct);
+            await foreach (var tok in qStream)
             {
                 sb.Append(tok);
                 yield return ChatEvent.Token(tok);
@@ -156,12 +159,16 @@ public class ChatOrchestrator
             _commandStore.Save(key, finalCmd);
         }
 
-        // 8. Narrate — collect tokens (yield inside try/catch is illegal in C# iterators)
+        // 8. Narrate — collect tokens with idle watchdog
+        //    (yield inside try/catch is illegal in C# iterators — so collect first, yield after)
         var narrateSb     = new StringBuilder();
         var narrateTokens = new List<string>();
         try
         {
-            await foreach (var tok in _llm.NarrateStream(finalCmd, output, exitCode, userMessage, ct))
+            var narStream = WithIdleTimeout(
+                _llm.NarrateStream(finalCmd, output, exitCode, userMessage, ct),
+                idleSeconds: 15, ct: ct);
+            await foreach (var tok in narStream)
             {
                 narrateTokens.Add(tok);
                 narrateSb.Append(tok);
@@ -300,5 +307,64 @@ public class ChatOrchestrator
     public void ClearHistory()
     {
         lock (_history) { _history.Clear(); }
+    }
+
+    // ── Idle watchdog ─────────────────────────────────────────────────────────
+    //
+    // Wraps any IAsyncEnumerable<string> (LLM token stream) and cancels it if no
+    // new token arrives within <idleSeconds>. Unlike a hard wall-clock timeout this
+    // allows arbitrarily long responses — as long as the model keeps generating.
+    //
+    // Stuck model / crashed Ollama → no tokens → watchdog fires after idleSeconds.
+    // Slow but working model      → tokens arrive slowly → watchdog keeps resetting.
+
+    private static async IAsyncEnumerable<string> WithIdleTimeout(
+        IAsyncEnumerable<string> source,
+        int idleSeconds,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Linked CTS: cancelled either by caller (ct) or by our watchdog
+        var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+        // Shared timestamp: updated on every token (Volatile for thread-safety)
+        long lastTick = Stopwatch.GetTimestamp();
+
+        // Background watchdog — polls every second
+        var watchdog = Task.Run(async () =>
+        {
+            while (!idleCts.Token.IsCancellationRequested)
+            {
+                try { await Task.Delay(1000, idleCts.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+
+                var idleMs = (Stopwatch.GetTimestamp() - Volatile.Read(ref lastTick))
+                             * 1000L / Stopwatch.Frequency;
+
+                if (idleMs > idleSeconds * 1000L)
+                {
+                    ArchLogger.LogWarn(
+                        $"[IdleWatchdog] No token for {idleMs}ms — LLM may be stuck. Cancelling.");
+                    idleCts.Cancel();
+                    return;
+                }
+            }
+        }, CancellationToken.None);
+
+        // yield return inside try/finally (no catch) is legal in C# iterators
+        try
+        {
+            await foreach (var tok in source.WithCancellation(idleCts.Token))
+            {
+                Volatile.Write(ref lastTick, Stopwatch.GetTimestamp()); // reset idle clock
+                yield return tok;
+            }
+        }
+        finally
+        {
+            // Stop watchdog regardless of how we exit (normal end, cancel, exception)
+            idleCts.Cancel();
+            try { await watchdog.ConfigureAwait(false); } catch { /* cancelled — expected */ }
+            idleCts.Dispose();
+        }
     }
 }

@@ -439,11 +439,11 @@ public class LLMAdapter : IDisposable
         string command, string output, int exitCode, string userMessage,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        const string sys = "תרגם פלט מכונה למשפט אחד בעברית. היה קצר וברור.";
+        const string sys = "תרגם פלט מכונה לעברית. היה קצר וברור. אפשר 2-3 משפטים.";
         var result  = exitCode == 0 ? "הצליחה" : "נכשלה";
-        var outSnip = output.Length > 200 ? output[..200] + "..." : output;
+        var outSnip = output.Length > 300 ? output[..300] + "..." : output;
         var user    = $"בקשה: {userMessage}\nפקודה: {command}\nתוצאה: {result}\nפלט: {outSnip}";
-        await foreach (var tok in StreamAsync(sys, user, 80, ct))
+        await foreach (var tok in StreamAsync(sys, user, 200, ct))
             yield return tok;
     }
 
